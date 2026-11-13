@@ -19,6 +19,7 @@
 #include <string.h>
 #include "NDS.h"
 #include "GPU.h"
+#include "workbench/Workbench.h"
 
 #include "ARMJIT.h"
 
@@ -645,6 +646,7 @@ void GPU::MapVRAM_AB(u32 bank, u8 cnt) noexcept
             break;
         }
     }
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 void GPU::MapVRAM_CD(u32 bank, u8 cnt) noexcept
@@ -740,6 +742,7 @@ void GPU::MapVRAM_CD(u32 bank, u8 cnt) noexcept
     }
 
     // TODO sync capture blocks if we get mapped to ARM7?
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 void GPU::MapVRAM_E(u32 bank, u8 cnt) noexcept
@@ -808,6 +811,7 @@ void GPU::MapVRAM_E(u32 bank, u8 cnt) noexcept
             break;
         }
     }
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 void GPU::MapVRAM_FG(u32 bank, u8 cnt) noexcept
@@ -916,6 +920,7 @@ void GPU::MapVRAM_FG(u32 bank, u8 cnt) noexcept
             break;
         }
     }
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 void GPU::MapVRAM_H(u32 bank, u8 cnt) noexcept
@@ -974,6 +979,7 @@ void GPU::MapVRAM_H(u32 bank, u8 cnt) noexcept
             break;
         }
     }
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 void GPU::MapVRAM_I(u32 bank, u8 cnt) noexcept
@@ -1042,6 +1048,7 @@ void GPU::MapVRAM_I(u32 bank, u8 cnt) noexcept
             break;
         }
     }
+    if (NDS.WB) NDS.WB->MappingChanged();    // the workbench snapshots the new mapping
 }
 
 

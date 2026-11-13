@@ -593,7 +593,7 @@ public:
     void OnDiscontinuity(u32 cpu, u32 pc, u32 sp, u32 vecbase);
     void OnRead(u32 cpu, u32 addr, u32 size, u32 value);
     void OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa, u32 sp);
-    void OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value);
+    void OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value, u32 oldvalue);    // oldvalue: dst before the write
     void OnCardCommand(const u8* cmd);
     void OnCardData(u32 cpu, u32 value);
     void OnTcmChange(u32 itcmsize, u32 dtcmbase, u32 dtcmsize);
@@ -840,6 +840,23 @@ public:
 
 private:
     melonDS::NDS* NDS = nullptr;
+
+    // The memory mapping Translate needs (TCM, shared WRAM, VRAM banks). The recorder thread translates
+    // with its own copy, as it was when the event happened: a snapshot travels with each mapping change
+    struct MapState
+    {
+        u32 ITCMSize = 0, DTCMMask = 0, DTCMBase = 0xFFFFFFFF;
+        s64 SW9Off = -1, SW7Off = -1;   // offset into SharedWRAM, -1: not mapped
+        u32 SW9Mask = 0, SW7Mask = 0;
+        u32 LCDC = 0, ABG[0x20] {}, AOBJ[0x10] {}, BBG[8] {}, BOBJ[8] {}, ARM7[2] {};
+    };
+    void CaptureMap(MapState& m) const;
+    // shortcut: 256 snapshots in flight; a game remapping more often than that within the ring's lag
+    // would overwrite one still queued. Grow it if a trace ever shows that many remaps per frame
+    MapState MapSnaps[256];
+    u32 MapSnapNext = 0;
+    MapState ConsMap;               // the recorder thread's
+    bool ConsMapValid = false;
 
     enum class RecMsg : u8 { Exec, Post, Read, Write, DMA, CardCmd, CardData, Tcm, Mapping, FrameEnd };
     struct RecEvent

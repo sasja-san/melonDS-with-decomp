@@ -1017,7 +1017,7 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
     p->BlockFrame[idx >> BlockShift][Block_Write] = frame;
 }
 
-void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value)
+void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value, u32 oldvalue)
 {
 #ifdef MELONDS_TRACE_RECORDING
     TraceDMA++;
@@ -1062,8 +1062,7 @@ void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value
 
     if (dpa.Recordable())
     {
-        u32 old = 0;
-        if (HistoryOn) if (u8* ptr = WB.PhysPtr(dpa)) memcpy(&old, ptr, size);
+        u32 old = oldvalue;     // read by the emulator thread before the write (memory has moved on since)
         if (HistoryOn && HistoryWanted(cpu ? 3 : 2, dst, size, src, 0, old == value))
         {
             WriteHistoryEntry e;
@@ -1354,13 +1353,15 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
     PhysAddr pa;
     if (!NDS) return pa;
     melonDS::NDS& nds = *NDS;
+    // the recorder thread translates with the mapping of the event it is handling
+    const MapState* M = (tlRecThread && ConsMapValid) ? &ConsMap : nullptr;
 
     if (cpu == 0 || cpu == 2)
     {
         if (cpu == 0)
         {
-            if (addr < nds.ARM9.ITCMSize) { pa.Region = (u16)Region::ITCM; pa.Offset = addr & (ITCMPhysicalSize - 1); return pa; }
-            if ((addr & nds.ARM9.DTCMMask) == nds.ARM9.DTCMBase) { pa.Region = (u16)Region::DTCM; pa.Offset = addr & (DTCMPhysicalSize - 1); return pa; }
+            if (addr < (M ? M->ITCMSize : nds.ARM9.ITCMSize)) { pa.Region = (u16)Region::ITCM; pa.Offset = addr & (ITCMPhysicalSize - 1); return pa; }
+            if ((addr & (M ? M->DTCMMask : nds.ARM9.DTCMMask)) == (M ? M->DTCMBase : nds.ARM9.DTCMBase)) { pa.Region = (u16)Region::DTCM; pa.Offset = addr & (DTCMPhysicalSize - 1); return pa; }
         }
         if ((addr & 0xFFFF0000) == 0xFFFF0000) { pa.Region = (u16)Region::BIOS9; pa.Offset = addr & 0xFFFF; return pa; }
         switch (addr >> 24)
@@ -1378,10 +1379,11 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
                 pa.Region = (u16)Region::MainRAM; pa.Offset = off; return pa;
             }
         case 0x03:
-            if (nds.SWRAM_ARM9.Mem)
+            if (M ? M->SW9Off >= 0 : nds.SWRAM_ARM9.Mem != nullptr)
             {
                 pa.Region = (u16)Region::SharedWRAM;
-                pa.Offset = (u32)(nds.SWRAM_ARM9.Mem - nds.SharedWRAM) + (addr & nds.SWRAM_ARM9.Mask);
+                pa.Offset = M ? (u32)M->SW9Off + (addr & M->SW9Mask)
+                              : (u32)(nds.SWRAM_ARM9.Mem - nds.SharedWRAM) + (addr & nds.SWRAM_ARM9.Mask);
             }
             return pa;
         case 0x04: pa.Region = (u16)Region::IO9; pa.Offset = addr & 0xFFFFFF; return pa;
@@ -1393,10 +1395,10 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
                 GPU& gpu = nds.GPU;
                 switch (addr & 0x00E00000)
                 {
-                case 0x00000000: mask = gpu.VRAMMap_ABG[(addr >> 14) & 0x1F]; break;
-                case 0x00200000: mask = gpu.VRAMMap_BBG[(addr >> 14) & 0x7]; break;
-                case 0x00400000: mask = gpu.VRAMMap_AOBJ[(addr >> 14) & 0xF]; break;
-                case 0x00600000: mask = gpu.VRAMMap_BOBJ[(addr >> 14) & 0x7]; break;
+                case 0x00000000: mask = (M ? M->ABG : gpu.VRAMMap_ABG)[(addr >> 14) & 0x1F]; break;
+                case 0x00200000: mask = (M ? M->BBG : gpu.VRAMMap_BBG)[(addr >> 14) & 0x7]; break;
+                case 0x00400000: mask = (M ? M->AOBJ : gpu.VRAMMap_AOBJ)[(addr >> 14) & 0xF]; break;
+                case 0x00600000: mask = (M ? M->BOBJ : gpu.VRAMMap_BOBJ)[(addr >> 14) & 0x7]; break;
                 default:
                     {
                         u32 a = addr & 0xFFFFFF;
@@ -1407,7 +1409,7 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
                             for (int b = 8; b >= 0; b--)
                                 if (r >= VRAMBankBase[b]) { bank = b; break; }
                         }
-                        if (bank >= 0 && (gpu.VRAMMap_LCDC & (1 << bank)))
+                        if (bank >= 0 && ((M ? M->LCDC : gpu.VRAMMap_LCDC) & (1 << bank)))
                         {
                             pa.Region = (u16)Region::VRAM;
                             pa.Offset = VRAMBankBase[bank] + ((a - 0x800000 - VRAMBankBase[bank]) & gpu.VRAMMask[bank]);
@@ -1446,10 +1448,11 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
             pa.Region = (u16)Region::MainRAM; pa.Offset = off; return pa;
         }
     case 0x03000000:
-        if (nds.SWRAM_ARM7.Mem)
+        if (M ? M->SW7Off >= 0 : nds.SWRAM_ARM7.Mem != nullptr)
         {
             pa.Region = (u16)Region::SharedWRAM;
-            pa.Offset = (u32)(nds.SWRAM_ARM7.Mem - nds.SharedWRAM) + (addr & nds.SWRAM_ARM7.Mask);
+            pa.Offset = M ? (u32)M->SW7Off + (addr & M->SW7Mask)
+                          : (u32)(nds.SWRAM_ARM7.Mem - nds.SharedWRAM) + (addr & nds.SWRAM_ARM7.Mask);
         }
         else
         {
@@ -1466,7 +1469,7 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
     case 0x06000000:
     case 0x06800000:
         {
-            u32 mask = nds.GPU.VRAMMap_ARM7[(addr >> 17) & 0x1];
+            u32 mask = (M ? M->ARM7 : nds.GPU.VRAMMap_ARM7)[(addr >> 17) & 0x1];
             if (!mask) return pa;
             int bank = (mask & (1 << 2)) ? 2 : 3;
             pa.Region = (u16)Region::VRAM;
@@ -1477,6 +1480,29 @@ PhysAddr Workbench::Translate(u32 cpu, u32 addr) const
         pa.Region = (u16)Region::GBASlot; pa.Offset = addr & 0xFFFFFF; return pa;
     }
     return pa;
+}
+
+void Workbench::CaptureMap(MapState& m) const
+{
+    if (!NDS) return;
+    const melonDS::NDS& n = *NDS;
+    m.ITCMSize = n.ARM9.ITCMSize;
+    m.DTCMMask = n.ARM9.DTCMMask;
+    m.DTCMBase = n.ARM9.DTCMBase;
+    m.SW9Off = n.SWRAM_ARM9.Mem ? n.SWRAM_ARM9.Mem - n.SharedWRAM : -1;
+    m.SW7Off = n.SWRAM_ARM7.Mem ? n.SWRAM_ARM7.Mem - n.SharedWRAM : -1;
+    m.SW9Mask = n.SWRAM_ARM9.Mask;
+    m.SW7Mask = n.SWRAM_ARM7.Mask;
+    const GPU& g = n.GPU;
+    static_assert(sizeof(m.ABG) == sizeof(g.VRAMMap_ABG) && sizeof(m.AOBJ) == sizeof(g.VRAMMap_AOBJ) &&
+                  sizeof(m.BBG) == sizeof(g.VRAMMap_BBG) && sizeof(m.BOBJ) == sizeof(g.VRAMMap_BOBJ) &&
+                  sizeof(m.ARM7) == sizeof(g.VRAMMap_ARM7), "VRAM map sizes");
+    m.LCDC = g.VRAMMap_LCDC;
+    memcpy(m.ABG, g.VRAMMap_ABG, sizeof(m.ABG));
+    memcpy(m.AOBJ, g.VRAMMap_AOBJ, sizeof(m.AOBJ));
+    memcpy(m.BBG, g.VRAMMap_BBG, sizeof(m.BBG));
+    memcpy(m.BOBJ, g.VRAMMap_BOBJ, sizeof(m.BOBJ));
+    memcpy(m.ARM7, g.VRAMMap_ARM7, sizeof(m.ARM7));
 }
 
 u8* Workbench::PhysPtr(PhysAddr pa) const
@@ -1599,6 +1625,8 @@ Workbench::RecEvent& Workbench::RecBegin(RecMsg kind, u32 cpu)
         if (!RecRing) RecRing.reset(new RecEvent[RecRingSize]);
         RecFrame = Frame();
         RecTs = Timestamp();
+        CaptureMap(ConsMap);
+        ConsMapValid = NDS != nullptr;
         RecStop = false;
         RecThread = std::thread([this]() { RecThreadMain(); });
     }
@@ -1693,6 +1721,8 @@ void Workbench::RecDrain()
     RecTs = Timestamp();
     RecCur[0] = Cur[0];
     RecCur[1] = Cur[1];
+    CaptureMap(ConsMap);
+    ConsMapValid = NDS != nullptr;
 }
 
 void Workbench::RecThreadMain()
@@ -1847,6 +1877,9 @@ void Workbench::DMAUnit(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 va
     e.D = channel;
     e.Size = (u8)size;
     e.E = (u32)ts;
+    u32 old = 0;
+    if (u8* p = PhysPtr(Translate(cpu ? 3 : 2, dst))) memcpy(&old, p, size);
+    e.F = old;
     RecCommit();
     if (Dbg.WatchPages && Dbg.WatchPages[dst >> PageShift])
         Dbg.CheckAccess(cpu ? 3 : 2, dst, size, value, true);
@@ -1869,17 +1902,24 @@ void Workbench::CardData(u32 value)
 void Workbench::TcmChanged()
 {
     if (!NDS) return;
+    MappingChanged();
     u32 dtcmsize = NDS->ARM9.DTCMMask ? (~NDS->ARM9.DTCMMask + 1) : 0;
+    u64 ts = Timestamp();
     RecEvent& e = RecBegin(RecMsg::Tcm, 0);
     e.A = NDS->ARM9.ITCMSize;
     e.B = NDS->ARM9.DTCMBase;
     e.C = dtcmsize;
+    e.E = (u32)ts;
     RecCommit();
 }
 
 void Workbench::MappingChanged()
 {
-    RecBegin(RecMsg::Mapping, 0);
+    // after the change: the snapshot is what the recorder thread translates with from here on
+    u32 slot = MapSnapNext++ & 255;
+    CaptureMap(MapSnaps[slot]);
+    RecEvent& e = RecBegin(RecMsg::Mapping, 0);
+    e.A = slot;
     RecCommit();
 }
 
@@ -1998,7 +2038,7 @@ void Workbench::RecDispatch(const RecEvent& e)
                 }
                 Taint.OnDMA(cpu, src, dst, size, fixed);
             }
-            Rec.OnDMA(cpu, e.D, src, dst, size, e.C);
+            Rec.OnDMA(cpu, e.D, src, dst, size, e.C, e.F);
         }
         break;
     case RecMsg::CardCmd:
@@ -2008,10 +2048,13 @@ void Workbench::RecDispatch(const RecEvent& e)
         Rec.OnCardData(cpu, e.A);
         break;
     case RecMsg::Tcm:
+        RecTs = TimeFromLow(RecTs, e.E);
         MapGen++;
         Rec.OnTcmChange(e.A, e.B, e.C);
         break;
     case RecMsg::Mapping:
+        ConsMap = MapSnaps[e.A];
+        ConsMapValid = true;
         MapGen++;
         break;
     case RecMsg::FrameEnd:

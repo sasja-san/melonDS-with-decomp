@@ -1313,7 +1313,6 @@ void NDS::MapSharedWRAM(u8 val)
     JIT.Memory.RemapSWRAM();
 
     WRAMCnt = val;
-    if (WB) WB->MappingChanged();
 
     switch (WRAMCnt & 0x3)
     {
@@ -1345,6 +1344,7 @@ void NDS::MapSharedWRAM(u8 val)
         SWRAM_ARM7.Mask = 0x7FFF;
         break;
     }
+    if (WB) WB->MappingChanged();      // after the change: the workbench takes a snapshot
 }
 
 
