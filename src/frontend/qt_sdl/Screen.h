@@ -291,6 +291,11 @@ public:
     explicit ScreenPanelGL(QWidget* parent);
     virtual ~ScreenPanelGL();
 
+    // a picture of what the panel shows (QWidget::grab() can't read an OpenGL surface): request,
+    // then poll takeReadback; the next drawScreen (also while paused) reads its back buffer
+    void requestReadback();
+    bool takeReadback(QImage& out);
+
     std::optional<WindowInfo> getWindowInfo();
 
     bool createContext();
@@ -332,6 +337,9 @@ private:
     GLuint crtFramebuffer = 0, crtYiqTexture = 0, crtGlowTexture = 0;
     GLint crtPrepassLayerULoc = -1;
     GLint crtPrepassPlainULoc = -1;
+    std::mutex readbackLock;
+    bool readbackWanted = false, readbackDone = false;
+    QImage readback;
     GLint crtSavedBinding[3] = {0, 0, 0};   // units 1 to 3, put back after the CRT draw
     GLint crtScreenSizeULoc = -1, crtTransformULoc = -1, crtParamULoc[kNumCrtParams];
     void drawCrtPrepass(unsigned layers);

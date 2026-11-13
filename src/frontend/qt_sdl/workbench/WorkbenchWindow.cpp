@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstring>
 #include <memory>
+#include <QPainter>
 #include <QAbstractButton>
 #include <QChildEvent>
 #include <QCloseEvent>
@@ -53,6 +54,7 @@
 #include <QStatusBar>
 #include <QTabBar>
 
+#include "../Screen.h"
 #include "Trace.h"
 #include "WorkbenchWindow.h"
 #include "Panels.h"
@@ -755,10 +757,36 @@ void WorkbenchWindow::CaptureUi(const QString& dock, int maxWidth, UiCaptureFn c
         QPixmap pix = target->grab();
         if (pix.isNull() || pix.width() < 1 || pix.height() < 1) { fail("could not capture the workbench"); return; }
         QImage img = pix.toImage();
-        if (maxWidth > 0 && img.width() > maxWidth)
-            img = img.scaled(maxWidth, std::max(1, img.height()), Qt::KeepAspectRatio, Qt::SmoothTransformation);
-        cb(true, img, dock, stale, {});
-        job->deleteLater();
+        auto finish = [=](QImage img)
+        {
+            if (maxWidth > 0 && img.width() > maxWidth)
+                img = img.scaled(maxWidth, std::max(1, img.height()), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            cb(true, img, dock, stale, {});
+            job->deleteLater();
+        };
+        // OpenGL screens come out black in grab(): their own read of the back buffer goes on top
+        QList<ScreenPanelGL*> gl = target->findChildren<ScreenPanelGL*>();
+        gl.erase(std::remove_if(gl.begin(), gl.end(), [](ScreenPanelGL* p) { return !p->isVisible(); }), gl.end());
+        if (gl.isEmpty()) { finish(img); return; }
+        for (ScreenPanelGL* p : gl) p->requestReadback();
+        auto shots = std::make_shared<std::vector<QImage>>(gl.size());
+        auto tries = std::make_shared<int>(0);
+        auto poll = std::make_shared<std::function<void()>>();
+        *poll = [=]()
+        {
+            bool all = true;
+            for (int i = 0; i < gl.size(); i++)
+                if ((*shots)[i].isNull() && !gl[i]->takeReadback((*shots)[i])) all = false;
+            if (!all && ++*tries < 34) { QTimer::singleShot(30, job, [poll]() { (*poll)(); }); return; }
+            QImage out = img;
+            QPainter painter(&out);
+            for (int i = 0; i < gl.size(); i++)
+                if (!(*shots)[i].isNull())
+                    painter.drawImage(QRect(gl[i]->mapTo(target, QPoint(0, 0)), gl[i]->size()), (*shots)[i]);
+            painter.end();
+            finish(out);
+        };
+        (*poll)();
     };
     QTimer::singleShot(0, job, [job]() { if (job->Step) job->Step(); });
 }

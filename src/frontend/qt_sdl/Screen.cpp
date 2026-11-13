@@ -1518,6 +1518,22 @@ void ScreenPanelGL::drawCrtDecode(unsigned layers, uint32_t frame)
     for (int b = 0; b < 2; b++) glColorMaski(b, mask[b][0], mask[b][1], mask[b][2], mask[b][3]);
 }
 
+void ScreenPanelGL::requestReadback()
+{
+    std::lock_guard<std::mutex> l(readbackLock);
+    readbackWanted = true;
+    readbackDone = false;
+}
+
+bool ScreenPanelGL::takeReadback(QImage& out)
+{
+    std::lock_guard<std::mutex> l(readbackLock);
+    if (!readbackDone) return false;
+    out = std::move(readback);
+    readbackDone = false;
+    return true;
+}
+
 void ScreenPanelGL::drawScreen()
 {
     if (!glContext) return;
@@ -1744,6 +1760,19 @@ void ScreenPanelGL::drawScreen()
         osdMutex.unlock();
     }
 
+    {
+        std::lock_guard<std::mutex> l(readbackLock);
+        if (readbackWanted)
+        {
+            // the finished frame, before the swap: GL rows run bottom-up
+            QImage img(w, h, QImage::Format_RGBA8888);
+            glPixelStorei(GL_PACK_ALIGNMENT, 4);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, img.bits());
+            readback = img.mirrored();
+            readbackWanted = false;
+            readbackDone = true;
+        }
+    }
     glContext->SwapBuffers();
     // the first frame on a window that is on screen (the hidden main window of -wo doesn't count): a
     // landmark in traces, and the time to put on the desktop's full look (applyDesktopLook)
