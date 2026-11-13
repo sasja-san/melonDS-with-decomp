@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <QTimer>
 #include <algorithm>
 #include <condition_variable>
 #include <map>
@@ -218,12 +219,23 @@ void WBHost::OnRomLoaded(const QString& path, u32 filelen)
     }
     QMetaObject::invokeMethod(this, [this, path]()
     {
-        TRACE_QT("ROM loaded: on the GUI thread");
-        CurRomPath = path;
-        AllTimeData.reset();
-        { TRACE_QT("OpenKnowledgeStore"); OpenKnowledgeStore(); }
-        { TRACE_QT("romChanged handlers"); emit romChanged(); }
-        emit recordingChanged();
+        // after the game's first frames: opening the knowledge store and refreshing the panels (30-80 ms)
+        // would otherwise hold up the first frame on screen
+        // shortcut: frame 5 stands for "the first frame is drawn"; a signal from the screen panel would be exact
+        auto* wait = new QTimer(this);
+        qint64 since = QDateTime::currentMSecsSinceEpoch();
+        connect(wait, &QTimer::timeout, this, [this, wait, path, since]()
+        {
+            if (Status().Frame < 5 && QDateTime::currentMSecsSinceEpoch() - since < 2000) return;
+            wait->deleteLater();
+            TRACE_QT("ROM loaded: on the GUI thread");
+            CurRomPath = path;
+            AllTimeData.reset();
+            { TRACE_QT("OpenKnowledgeStore"); OpenKnowledgeStore(); }
+            { TRACE_QT("romChanged handlers"); emit romChanged(); }
+            emit recordingChanged();
+        });
+        wait->start(10);
     }, Qt::QueuedConnection);
 }
 

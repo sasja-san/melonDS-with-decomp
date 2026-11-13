@@ -282,6 +282,7 @@ private:
     QWidget* GameHost = nullptr;
     QWidget* GamePlaceholder = nullptr;
     MainWindow* GameWin = nullptr;
+    bool Closing = false;           // in the destructor: the game screen isn't shown again on its own
     ads::CDockWidget* StandIn = nullptr;    // fills the window beside the game until the layout is built
     QHash<QString, QAction*> Actions;
     bool HasMenuTarget = false;

@@ -926,7 +926,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
         // if the window was closed in fullscreen do not restore this
         setWindowState(windowState() & ~Qt::WindowFullScreen);
     }
-    if (embedded || id != 0 || !MainWindowStartHidden) show();
+    if (!(id == 0 && MainWindowStartHidden)) show();     // -wo: shown in the workbench
 
     if (helloWindow)
     {

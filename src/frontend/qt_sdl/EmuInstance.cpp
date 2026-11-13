@@ -17,6 +17,8 @@
 */
 
 #include <assert.h>
+#include <filesystem>
+#include <thread>
 #include <stdio.h>
 #include <string.h>
 
@@ -142,6 +144,16 @@ EmuInstance::EmuInstance(int inst) : deleting(false),
     for (int i = 0; i < kMaxWindows; i++)
         windowList[i] = nullptr;
 
+    // the console (new NDS: ~85 ms) is made on a worker while the main window is built; the first
+    // updateConsole (the startup ROM boot) takes it. Its settings are read here, on this thread
+    if (inst == 0 && globalCfg.GetInt("Emu.ConsoleType") == 0)
+        if (auto args = buildNDSArgs())
+            prebuildThread = std::thread([this, a = std::make_shared<NDSArgs>(std::move(*args))]() mutable
+            {
+                TRACE_EMU("prebuild NDS (worker)");
+                prebuiltNDS = new NDS(std::move(*a), this);
+            });
+
     if (inst == 0) topWindow = nullptr;
     createWindow();
 
@@ -166,6 +178,10 @@ EmuInstance::~EmuInstance()
 
     emuThread->emuExit();
     emuThread->wait();
+    // a console made at startup and never taken (no ROM booted)
+    if (prebuildThread.joinable()) prebuildThread.join();
+    delete prebuiltNDS;
+    prebuiltNDS = nullptr;
     delete wbHost;
     wbHost = nullptr;
     delete emuThread;
@@ -195,6 +211,9 @@ std::string EmuInstance::instanceFileSuffix()
 
 MainWindow* EmuInstance::createEmbeddedWindow(QWidget* host)
 {
+    // -wo: the main window was made for the workbench (embedded, never shown on its own): it is the game
+    // screen, and no second window is made
+    if (windowList[0] && windowList[0]->isEmbedded() && !windowList[0]->parentWidget()) return windowList[0];
     int id = -1;
     for (int i = 1; i < kMaxWindows; i++)
         if (!windowList[i]) { id = i; break; }
@@ -237,7 +256,10 @@ void EmuInstance::createWindow(int id)
     if (windowList[id])
         return;
 
+    // -wo: the main window is only ever shown in the workbench's Game screen panel (createEmbeddedWindow)
+    bool forWorkbench = (id == 0 && MainWindowStartHidden);
     MainWindow* win = EmbedHost ? new MainWindow(id, this, EmbedHost, true)
+                    : forWorkbench ? new MainWindow(id, this, nullptr, true)
                                 : new MainWindow(id, this, mainWindow ? mainWindow : topWindow);
     if (!topWindow) topWindow = win;
     if (!mainWindow) mainWindow = win;
@@ -1253,6 +1275,58 @@ void EmuInstance::syncRTC()
 }
 
 
+std::optional<NDSArgs> EmuInstance::buildNDSArgs()
+{
+    auto arm9bios = [&] { TRACE_EMU("updateConsole: load ARM9 BIOS"); return loadARM9BIOS(); }();
+    if (!arm9bios)
+        return std::nullopt;
+
+    auto arm7bios = [&] { TRACE_EMU("updateConsole: load ARM7 BIOS"); return loadARM7BIOS(); }();
+    if (!arm7bios)
+        return std::nullopt;
+
+    auto firmware = [&] { TRACE_EMU("updateConsole: load firmware"); return loadFirmware(consoleType); }();
+    if (!firmware)
+        return std::nullopt;
+
+#ifdef JIT_ENABLED
+    Config::Table jitopt = globalCfg.GetTable("JIT");
+    JITArgs _jitargs {
+            static_cast<unsigned>(jitopt.GetInt("MaxBlockSize")),
+            jitopt.GetBool("LiteralOptimisations"),
+            jitopt.GetBool("BranchOptimisations"),
+            jitopt.GetBool("FastMemory"),
+    };
+    auto jitargs = jitopt.GetBool("Enable") ? std::make_optional(_jitargs) : std::nullopt;
+#else
+    std::optional<JITArgs> jitargs = std::nullopt;
+#endif
+
+#ifdef GDBSTUB_ENABLED
+    Config::Table gdbopt = localCfg.GetTable("Gdb");
+    GDBArgs _gdbargs {
+            static_cast<u16>(gdbopt.GetInt("ARM7.Port")),
+            static_cast<u16>(gdbopt.GetInt("ARM9.Port")),
+            gdbopt.GetBool("ARM7.BreakOnStartup"),
+            gdbopt.GetBool("ARM9.BreakOnStartup"),
+    };
+    auto gdbargs = gdbopt.GetBool("Enabled") ? std::make_optional(_gdbargs) : std::nullopt;
+#else
+    std::optional<GDBArgs> gdbargs = std::nullopt;
+#endif
+
+    return NDSArgs {
+            std::move(arm9bios),
+            std::move(arm7bios),
+            std::move(*firmware),
+            jitargs,
+            static_cast<AudioBitDepth>(globalCfg.GetInt("Audio.BitDepth")),
+            static_cast<AudioInterpolation>(globalCfg.GetInt("Audio.Interpolation")),
+            (double) audioFreq,
+            gdbargs,
+    };
+}
+
 bool EmuInstance::updateConsole() noexcept
 {
     // update the console type
@@ -1291,54 +1365,9 @@ bool EmuInstance::updateConsole() noexcept
 
 
     TRACE_EMU("updateConsole");
-    auto arm9bios = [&] { TRACE_EMU("updateConsole: load ARM9 BIOS"); return loadARM9BIOS(); }();
-    if (!arm9bios)
-        return false;
-
-    auto arm7bios = [&] { TRACE_EMU("updateConsole: load ARM7 BIOS"); return loadARM7BIOS(); }();
-    if (!arm7bios)
-        return false;
-
-    auto firmware = [&] { TRACE_EMU("updateConsole: load firmware"); return loadFirmware(consoleType); }();
-    if (!firmware)
-        return false;
-
-#ifdef JIT_ENABLED
-    Config::Table jitopt = globalCfg.GetTable("JIT");
-    JITArgs _jitargs {
-            static_cast<unsigned>(jitopt.GetInt("MaxBlockSize")),
-            jitopt.GetBool("LiteralOptimisations"),
-            jitopt.GetBool("BranchOptimisations"),
-            jitopt.GetBool("FastMemory"),
-    };
-    auto jitargs = jitopt.GetBool("Enable") ? std::make_optional(_jitargs) : std::nullopt;
-#else
-    std::optional<JITArgs> jitargs = std::nullopt;
-#endif
-
-#ifdef GDBSTUB_ENABLED
-    Config::Table gdbopt = localCfg.GetTable("Gdb");
-    GDBArgs _gdbargs {
-            static_cast<u16>(gdbopt.GetInt("ARM7.Port")),
-            static_cast<u16>(gdbopt.GetInt("ARM9.Port")),
-            gdbopt.GetBool("ARM7.BreakOnStartup"),
-            gdbopt.GetBool("ARM9.BreakOnStartup"),
-    };
-    auto gdbargs = gdbopt.GetBool("Enabled") ? std::make_optional(_gdbargs) : std::nullopt;
-#else
-    std::optional<GDBArgs> gdbargs = std::nullopt;
-#endif
-
-    NDSArgs ndsargs {
-            std::move(arm9bios),
-            std::move(arm7bios),
-            std::move(*firmware),
-            jitargs,
-            static_cast<AudioBitDepth>(globalCfg.GetInt("Audio.BitDepth")),
-            static_cast<AudioInterpolation>(globalCfg.GetInt("Audio.Interpolation")),
-            (double) audioFreq,
-            gdbargs,
-    };
+    auto builtargs = buildNDSArgs();
+    if (!builtargs) return false;
+    NDSArgs& ndsargs = *builtargs;
     NDSArgs* args = &ndsargs;
 
     std::optional<DSiArgs> dsiargs = std::nullopt;
@@ -1383,7 +1412,10 @@ bool EmuInstance::updateConsole() noexcept
         else
         {
             TRACE_EMU("updateConsole: new NDS");
-            nds = new NDS(std::move(ndsargs), this);
+            // made at startup on a worker (EmuInstance constructor) if it was: the same settings, read then
+            if (prebuildThread.joinable()) { TRACE_EMU("updateConsole: wait for the prebuilt NDS"); prebuildThread.join(); }
+            if (prebuiltNDS) { nds = prebuiltNDS; prebuiltNDS = nullptr; }
+            else nds = new NDS(std::move(ndsargs), this);
         }
         { TRACE_EMU("updateConsole: workbench AttachNDS"); wbHost->AttachNDS(nds); }
 
@@ -1806,6 +1838,53 @@ void EmuInstance::customizeFirmware(Firmware& firmware, bool overridesettings) n
 }
 
 // Loads ROM data without parsing it. Works for GBA and NDS ROMs.
+// The ROM file named on the command line is read on a worker from the start of main(), before
+// QApplication; the startup boot takes the bytes instead of reading the file itself.
+// joins in its destructor, so an exit() (--help) doesn't abort on a running read
+static struct JoiningThread : std::thread { using std::thread::operator=; ~JoiningThread() { if (joinable()) join(); } } romPrefetchThread;
+static std::string romPrefetchPath;
+static std::unique_ptr<u8[]> romPrefetchData;
+static long romPrefetchLen = 0;
+
+void EmuInstance::prefetchROMFile(const std::string& path)
+{
+    romPrefetchPath = path;
+    romPrefetchThread = std::thread([]()
+    {
+        TRACE_EMU("prefetch ROM file (worker)");
+        FILE* f = fopen(romPrefetchPath.c_str(), "rb");
+        if (!f) return;
+        fseek(f, 0, SEEK_END);
+        long len = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (len > 0 && len <= 0x40000000)
+        {
+            auto data = std::make_unique<u8[]>(len);
+            if (fread(data.get(), (size_t)len, 1, f) == 1) { romPrefetchData = std::move(data); romPrefetchLen = len; }
+        }
+        fclose(f);
+    });
+}
+
+void EmuInstance::dropPrefetchedROM()
+{
+    if (romPrefetchThread.joinable()) romPrefetchThread.join();
+    romPrefetchData = nullptr;
+}
+
+// the prefetched bytes if they are for this file; dropped either way (only the startup boot uses them)
+static bool takePrefetchedROM(const std::string& filename, std::unique_ptr<u8[]>& data, long& len)
+{
+    if (!romPrefetchThread.joinable() && !romPrefetchData) return false;
+    if (romPrefetchThread.joinable()) { TRACE_EMU("wait for the prefetched ROM"); romPrefetchThread.join(); }
+    std::error_code e1, e2;
+    bool same = romPrefetchData &&
+                std::filesystem::weakly_canonical(romPrefetchPath, e1) == std::filesystem::weakly_canonical(filename, e2) && !e1 && !e2;
+    if (same) { data = std::move(romPrefetchData); len = romPrefetchLen; }
+    romPrefetchData = nullptr;
+    return same;
+}
+
 bool EmuInstance::loadROMData(const QStringList& filepath, std::unique_ptr<u8[]>& filedata, u32& filelen, string& basepath, string& romname) noexcept
 {
     if (filepath.empty()) return false;
@@ -1815,24 +1894,28 @@ bool EmuInstance::loadROMData(const QStringList& filepath, std::unique_ptr<u8[]>
         // regular file
 
         std::string filename = filepath.at(0).toStdString();
-        Platform::FileHandle* f = Platform::OpenFile(filename, FileMode::Read);
-        if (!f) return false;
-
-        long len = Platform::FileLength(f);
-        if (len > 0x40000000)
+        long len = 0;
+        if (!takePrefetchedROM(filename, filedata, len))
         {
+            Platform::FileHandle* f = Platform::OpenFile(filename, FileMode::Read);
+            if (!f) return false;
+
+            len = Platform::FileLength(f);
+            if (len > 0x40000000)
+            {
+                Platform::CloseFile(f);
+                return false;
+            }
+
+            Platform::FileRewind(f);
+            filedata = make_unique<u8[]>(len);
+            size_t nread = Platform::FileRead(filedata.get(), (size_t)len, 1, f);
             Platform::CloseFile(f);
-            return false;
-        }
-
-        Platform::FileRewind(f);
-        filedata = make_unique<u8[]>(len);
-        size_t nread = Platform::FileRead(filedata.get(), (size_t)len, 1, f);
-        Platform::CloseFile(f);
-        if (nread != 1)
-        {
-            filedata = nullptr;
-            return false;
+            if (nread != 1)
+            {
+                filedata = nullptr;
+                return false;
+            }
         }
 
         filelen = (u32)len;

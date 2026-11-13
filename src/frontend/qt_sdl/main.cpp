@@ -303,6 +303,15 @@ static void signalHandler(int signal)
 int main(int argc, char** argv)
 {
     TRACE_QT_STEP("startup: before QApplication");
+    // the ROM file on the command line (the first argument that names a .nds/.srl/.dsi file) is read on a
+    // worker now; the startup boot takes the bytes if it boots that file
+    for (int i = 1; i < argc; i++)
+    {
+        QString a = QString::fromLocal8Bit(argv[i]);
+        if (a.startsWith('-') || !QFileInfo(a).isFile()) continue;
+        QString ext = QFileInfo(a).suffix().toLower();
+        if (ext == "nds" || ext == "srl" || ext == "dsi") { EmuInstance::prefetchROMFile(argv[i]); break; }
+    }
 #ifdef __linux__
     // the config (paths, then melonDS.toml) loads on a worker from the start, alongside QApplication and
     // SDL; nothing reads it before "startup: config load" waits for it. The executable's folder (for a
@@ -403,6 +412,11 @@ int main(int argc, char** argv)
         errorStr += err;
 
         QMessageBox::critical(nullptr, "melonDS", errorStr);
+        // the startup workers must be joined, or the exit aborts
+#ifdef __linux__
+        configThread.join();
+#endif
+        EmuInstance::dropPrefetchedROM();
         return 1;
     }
 
@@ -530,6 +544,7 @@ int main(int argc, char** argv)
 
     Config::Save();
 
+    EmuInstance::dropPrefetchedROM();
     EmuInstance::joystickInitWait();
     { TRACE_SDL_STARTUP("SDL_Quit"); SDL_Quit(); }
     TRACE_QT_STEP_END();

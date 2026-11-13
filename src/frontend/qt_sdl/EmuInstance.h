@@ -20,6 +20,8 @@
 #define EMUINSTANCE_H
 
 #include <SDL2/SDL.h>
+#include <thread>
+#include <optional>
 
 #include "Platform.h"
 #include "main.h"
@@ -134,6 +136,9 @@ public:
     QString verifySetup();
 
     bool updateConsole() noexcept;
+    std::optional<melonDS::NDSArgs> buildNDSArgs();
+    static void prefetchROMFile(const std::string& path);   // main(): read the command line's ROM file on a worker
+    static void dropPrefetchedROM();                        // main(), at exit    // the settings, BIOS and firmware a new NDS is made with
 
     void enableCheats(bool enable);
     melonDS::ARCodeFile* getCheatFile();
@@ -375,6 +380,8 @@ private:
     bool isRumbling = false;
 
     static std::shared_ptr<SDL_mutex> joyMutexGlobal;
+    std::thread prebuildThread;                 // makes prebuiltNDS at startup
+    melonDS::NDS* prebuiltNDS = nullptr;        // taken by the first updateConsole
     std::shared_ptr<SDL_mutex> joyMutex;
 
     melonDS::u32 keyInputMask, joyInputMask;

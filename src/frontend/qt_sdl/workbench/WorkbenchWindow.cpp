@@ -353,6 +353,7 @@ WorkbenchWindow::WorkbenchWindow(WBHost* host) : QMainWindow(nullptr), H(host)
 
 WorkbenchWindow::~WorkbenchWindow()
 {
+    Closing = true;
     SetEmbeddedScreen(false);
 }
 
@@ -453,6 +454,8 @@ void WorkbenchWindow::closeEvent(QCloseEvent* e)
     if (H->Settings().WorkbenchOnly || property("quitAll").toBool())
     {
         // the game window lives inside this one: hand it back to the instance before both go away
+        Closing = true;
+        if (GameWin && GameWin->getWindowID() == 0) SetEmbeddedScreen(false);   // -wo: detached, hidden, closed below
         if (GameWin) { MainWindow* g = GameWin; GameWin = nullptr; disconnect(g, &QObject::destroyed, this, nullptr); H->Instance()->deleteWindow(g->getWindowID(), true); }
         if (mw) mw->close();
     }
@@ -1371,10 +1374,18 @@ void WorkbenchWindow::SetEmbeddedScreen(bool on)
         MainWindow* g = GameWin;
         GameWin = nullptr;
         disconnect(g, &QObject::destroyed, this, nullptr);
-        if (inst) inst->deleteWindow(g->getWindowID(), true);
+        if (g->getWindowID() == 0)
+        {
+            // -wo: the game screen is the main window itself, which must outlive this panel: it goes back
+            // to being a window of its own (shown, unless the workbench is going away with the program)
+            g->setParent(nullptr);
+            g->setWindowFlags(Qt::Window);
+            if (!Closing) g->show();
+        }
+        else if (inst) inst->deleteWindow(g->getWindowID(), true);
         GamePlaceholder->show();
         if (ActHideMain) ActHideMain->setEnabled(false);
-        if (inst)
+        if (inst && !Closing)
             if (MainWindow* mw = inst->getMainWindow()) mw->show();
     }
 }
@@ -1382,7 +1393,7 @@ void WorkbenchWindow::SetEmbeddedScreen(bool on)
 void WorkbenchWindow::SetHideMainWindow(bool on)
 {
     MainWindow* mw = H->Instance() ? H->Instance()->getMainWindow() : nullptr;
-    if (!mw) return;
+    if (!mw || mw == GameWin) return;     // -wo: the main window is the game screen here
     // only while the game shows here: otherwise there would be no game on screen
     if (on && GameWin) mw->hide();
     else mw->show();
