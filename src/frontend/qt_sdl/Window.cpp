@@ -632,10 +632,12 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                     onChangeScreenFilter(act->data().toInt());
                 });
 
-                actToggleScreenFilter = menuScreenFilter->addAction("Turn filter on/off");
+                // Alt+F steps through the list (Off, LCD, CRT); a window action, not a menu item
+                actToggleScreenFilter = new QAction(this);
                 actToggleScreenFilter->setShortcut(QKeySequence(Qt::AltModifier | Qt::Key_F));
-                actToggleScreenFilter->setToolTip("Switches between Off and the filter used last");
+                addAction(actToggleScreenFilter);
                 connect(actToggleScreenFilter, &QAction::triggered, this, &MainWindow::onToggleScreenFilter);
+                menuScreenFilter->setToolTip("Alt+F steps through Off, LCD and CRT");
 
                 menuScreenFilter->addSeparator();
                 actLcdSettings = menuScreenFilter->addAction("LCD filter settings...");
@@ -2624,10 +2626,6 @@ void MainWindow::onChangeScreenFilter(int mode)
     // one setting for all windows of the instance; each screen keeps its implementation
     mode = std::clamp(mode, 0, (int)screenFilter_MAX - 1);
     Config::Table& local = emuInstance->getLocalConfig();
-    // the filter Alt+F brings back: the one being turned off, or the one being turned on
-    int cur = screenFilterSetting(local);
-    if (cur != screenFilter_Off) local.SetInt("ScreenFilterLast", cur);
-    if (mode != screenFilter_Off) local.SetInt("ScreenFilterLast", mode);
     local.SetInt("ScreenFilterMode", mode);
     Config::Save();
     for (int i = 0; i < kMaxWindows; i++)
@@ -2640,10 +2638,7 @@ void MainWindow::onChangeScreenFilter(int mode)
 
 void MainWindow::onToggleScreenFilter()
 {
-    Config::Table& local = emuInstance->getLocalConfig();
-    int last = local.GetInt("ScreenFilterLast");
-    if (last <= screenFilter_Off || last >= screenFilter_MAX) last = screenFilter_LCD;
-    onChangeScreenFilter(screenFilterSetting(local) == screenFilter_Off ? last : (int)screenFilter_Off);
+    onChangeScreenFilter((screenFilterSetting(emuInstance->getLocalConfig()) + 1) % screenFilter_MAX);
 }
 
 void MainWindow::onChangeScreenFiltering(bool checked)

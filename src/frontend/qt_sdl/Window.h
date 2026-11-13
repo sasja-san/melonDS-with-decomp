@@ -188,7 +188,7 @@ private slots:
     void onOpenNewWindow();
     void onChangeScreenFiltering(bool checked);
     void onChangeScreenFilter(int mode);   // screenFilter_Off, _LCD or _CRT, for the whole instance
-    void onToggleScreenFilter();            // Alt+F: Off, or back to the last filter used
+    void onToggleScreenFilter();            // Alt+F: the next in the list (Off, LCD, CRT)
     void updateScreenFilterMenu();
     void onChangeShowOSD(bool checked);
     void onChangeLimitFramerate(bool checked);

@@ -52,7 +52,6 @@ DefaultList<int> DefaultInts =
     {"Instance*.Window*.BlurReachX", 1},
     {"Instance*.PixelGridThreads", 0},    // software screen filters (LCD, CRT): 0 = automatic
     {"Instance*.ScreenFilterMode", -1},  // Off / LCD / CRT; -1 = never chosen, follow PixelGrid
-    {"Instance*.ScreenFilterLast", 1},   // the filter Alt+F turns back on
     {"Instance*.Window*.CrtCable", 2},     // CRT video signal cable: composite (console: CrtSignal, 0 = off)
     {"Instance*.Window*.SubpixelLayout", 3},   // DSi XL
     {"Instance*.Window*.BlurReachY", 1},
