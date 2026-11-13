@@ -98,6 +98,12 @@ void main()
     // picture's own detail
     bool hires = textureSize(ScreenTex, 0).x > int(kDSRes.x);
     vec2 at = hires ? p : floor(p) + 0.5;        // where to read, in DS pixels
+    if (!uGrid)
+    {
+        // screen filter Off: the plain picture, as the software display shows it
+        oColor = vec4(texture(ScreenTex, vec3(at / kDSRes, fTexcoord.z)).rgb, 1.0);
+        return;
+    }
     vec3 pixel;
     vec2 bw = vec2(uBlurReach.x > 0 ? uBlurX : 0.0, uBlurReach.y > 0 ? uBlurY : 0.0);
     if (bw.x <= 0.0 && bw.y <= 0.0)
@@ -214,6 +220,257 @@ void main()
     vec3 shown = pow(light * lineComp, vec3(1.0 / 2.2));
 
     oColor = vec4(shown * (1.0 - dark), 1.0);
+}
+)";
+
+// --- CRT filter ---------------------------------------------------------------------------------
+// After the CRT shader in "CRT shader for pixel art" (spritecook.ai). SoftCrtFilter.cpp is the
+// software version; a change to one should go to the other.
+//
+// The article's shader does everything per screen pixel (43 texture reads). Most of that depends
+// only on DS pixels, so a prepass at 256x192 per screen does it once per frame: the YIQ signal
+// with the luma prefilter, and the glow. The main pass then reads 18 texels and one bilinear glow.
+
+// one triangle covering the 256x192 target; no vertex data
+const char* kCrtPrepassVS = R"(#version 140
+
+void main()
+{
+    vec2 pos = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(pos * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char* kCrtPrepassFS = R"(#version 140
+
+uniform sampler2DArray ScreenTex;
+uniform float uLayer;          // 0 top screen, 1 bottom
+
+out vec4 oYiq;                 // luma with the [1 2 1] prefilter, I, Q
+out vec4 oGlow;                // 5x5 Gaussian of linear light (sigma 1.6 DS px)
+
+const vec2 kDSRes = vec2(256.0, 192.0);
+const vec3 kLuma = vec3(0.299, 0.587, 0.114);
+
+// a DS pixel: the texel at its centre (with 3D upscaling, one sample per DS pixel), edges clamped.
+// texelFetch on level 0: this pass draws at 256x192, so texture() would pick a smaller mip level
+// of an upscaled picture, which can hold an old image
+vec3 fetch(ivec2 t)
+{
+    t = clamp(t, ivec2(0), ivec2(kDSRes) - 1);
+    ivec2 size = textureSize(ScreenTex, 0).xy;
+    ivec2 at = ivec2((vec2(t) + 0.5) * vec2(size) / kDSRes);
+    return texelFetch(ScreenTex, ivec3(at, int(uLayer)), 0).rgb;
+}
+
+void main()
+{
+    ivec2 t = ivec2(gl_FragCoord.xy);
+    vec3 c = fetch(t);
+    float y = 0.25 * (dot(fetch(t - ivec2(1, 0)), kLuma) + 2.0 * dot(c, kLuma) + dot(fetch(t + ivec2(1, 0)), kLuma));
+    oYiq = vec4(y,
+                dot(c, vec3(0.596, -0.274, -0.322)),
+                dot(c, vec3(0.211, -0.523, 0.312)), 1.0);
+
+    vec3 acc = vec3(0.0);
+    float sum = 0.0;
+    for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++)
+    {
+        float w = exp(-0.5 * float(dx * dx + dy * dy) / 2.56);
+        acc += pow(fetch(t + ivec2(dx, dy)), vec3(2.4)) * w;
+        sum += w;
+    }
+    oGlow = vec4(acc / sum, 1.0);
+}
+)";
+
+// Video signal chain (NtscSignal): each decoded sample of a line is an exact weighted sum of the
+// nearby DS pixels, with weights the CPU worked out by simulating the console's encoder and the
+// TV (KernelTex). Drawn at the decoded sample rate, one row per DS line, per shown screen.
+// SoftCrtFilter does the same through Ntsc::Signal::decodeLine.
+const char* kCrtDecodeFS = R"(#version 140
+
+uniform sampler2DArray ScreenTex;
+uniform sampler2D KernelTex;     // x: tap * 3 + output channel, y: line phase * out phases + out phase; rgb: weights per input channel
+uniform sampler2D NoiseTex;      // decoded RF noise lines: x: sample, y: line
+uniform float uLayer;
+uniform int uPixelClocks, uOutStep, uOutPhases, uTaps, uTapLeft;
+uniform int uCarrier, uLineStep, uFramePhase;
+uniform int uLinePhaseOf[16];
+uniform vec3 uBias;
+uniform float uNoise;
+uniform int uNoiseLines;
+uniform uint uFrame;
+
+out vec4 oColor;
+
+const ivec2 kDSRes = ivec2(256, 192);
+
+vec3 fetch(ivec2 t)
+{
+    ivec2 size = textureSize(ScreenTex, 0).xy;
+    ivec2 at = ivec2((vec2(t) + 0.5) * vec2(size) / vec2(kDSRes));
+    return texelFetch(ScreenTex, ivec3(at, int(uLayer)), 0).rgb;
+}
+
+uint hash32(uint x)
+{
+    x ^= x >> 16u; x *= 0x7feb352du;
+    x ^= x >> 15u; x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+void main()
+{
+    int o = int(gl_FragCoord.x), row = int(gl_FragCoord.y);
+    int p = (o * uOutStep + uOutStep / 2) / uPixelClocks;
+    int lp = uLinePhaseOf[(uFramePhase + row * uLineStep) % uCarrier];
+    int ky = lp * uOutPhases + o % uOutPhases;
+    vec3 acc = uBias;
+    for (int k = 0; k < uTaps; k++)
+    {
+        int pp = p + k - uTapLeft;
+        if (pp < 0 || pp >= kDSRes.x) continue;
+        vec3 c = fetch(ivec2(pp, row));
+        acc.r += dot(texelFetch(KernelTex, ivec2(k * 3 + 0, ky), 0).rgb, c);
+        acc.g += dot(texelFetch(KernelTex, ivec2(k * 3 + 1, ky), 0).rgb, c);
+        acc.b += dot(texelFetch(KernelTex, ivec2(k * 3 + 2, ky), 0).rgb, c);
+    }
+    if (uNoiseLines > 0)
+    {
+        int nl = int(hash32(uint(row) * 7919u + uFrame * 104729u) % uint(uNoiseLines));
+        acc += uNoise * texelFetch(NoiseTex, ivec2(o, nl), 0).rgb;
+    }
+    oColor = vec4(clamp(acc, 0.0, 1.0), 1.0);   // the TV clips
+}
+)";
+
+const char* kCrtFS = R"(#version 140
+
+uniform sampler2DArray YiqTex;     // prepass: prefiltered luma, I, Q per DS pixel (nearest)
+uniform sampler2DArray GlowTex;    // prepass: glow per DS pixel, linear light (bilinear)
+uniform sampler2DArray DecodedTex; // video signal chain: decoded R'G'B' lines (bilinear), when uSignal
+uniform bool uSignal;
+uniform float uSigPixelClocks, uSigStep, uSigHalfStep, uSigWidth, uSigTexWidth;
+uniform float uCrtWarp;            // curvature 0..1
+uniform float uCrtLumaBlur;        // luma Gaussian sigma, DS px
+uniform float uCrtChromaBlur;      // chroma Gaussian sigma, DS px
+uniform float uCrtBeamMin;         // beam sigma on black, DS rows
+uniform float uCrtBeamMax;         // beam sigma on white
+uniform float uCrtMask;            // aperture grille strength 0..1
+uniform float uCrtMaskPx;          // screen pixels per stripe
+uniform float uCrtGlow;
+uniform float uCrtVignette;
+uniform float uCrtBoost;
+
+smooth in vec3 fTexcoord;
+
+out vec4 oColor;
+
+const vec2 kDSRes = vec2(256.0, 192.0);
+
+// a scanline beam: thin on dark pixels, wider on bright ones, d DS rows from its centre
+vec3 beam(vec3 lin, float d)
+{
+    vec3 s = max(mix(vec3(uCrtBeamMin), vec3(uCrtBeamMax), pow(lin, vec3(0.6))), vec3(1e-3));
+    return lin * exp(-0.5 * d * d / (s * s));
+}
+
+void main()
+{
+    // the mask's stripes follow the screen's own x axis, so they turn with a rotated screen, and
+    // count screen pixels from the screen's left edge, so at a whole zoom each triad sits on its
+    // DS pixel (as in the software filter). Here, before any early return, while derivatives
+    // are defined
+    float dx = dFdx(fTexcoord.x), dy = dFdy(fTexcoord.x);
+    bool alongX = abs(dx) >= abs(dy);
+    float d = alongX ? dx : dy;
+    float frag = alongX ? gl_FragCoord.x : gl_FragCoord.y;
+    float leftEdge = floor(frag - fTexcoord.x / d + 0.5);   // where the screen starts, in window pixels
+    float maskX = (frag - leftEdge) * sign(d);
+
+    // curvature
+    vec2 c = fTexcoord.xy * 2.0 - 1.0;
+    vec2 warp = uCrtWarp * vec2(0.124, 0.164);
+    c *= vec2(1.0 + c.y * c.y * warp.x, 1.0 + c.x * c.x * warp.y);
+    vec2 uv = c * 0.5 + 0.5;
+    // the curved edge, antialiased: how far inside it this pixel is, in screen pixels (half a
+    // pixel either side of the edge blends to black, so it doesn't look stepped at small zooms)
+    vec2 inside = min(uv, 1.0 - uv) / max(fwidth(uv), vec2(1e-6));
+    float edge = clamp(min(inside.x, inside.y) + 0.5, 0.0, 1.0);
+    if (edge <= 0.0)
+    {
+        oColor = vec4(0.0, 0.0, 0.0, 1.0);
+        return;
+    }
+    vec2 p = clamp(uv, 0.0, 1.0) * kDSRes;
+    int layer = int(fTexcoord.z + 0.5);
+
+    // horizontal signal blur: the 9 tap weights depend only on x, so both rows share them
+    int x0 = int(floor(p.x)) - 4;
+    float il = -0.5 / max(uCrtLumaBlur * uCrtLumaBlur, 1e-4);
+    float ic = -0.5 / max(uCrtChromaBlur * uCrtChromaBlur, 1e-4);
+    float wl[9], wc[9];
+    float sl = 0.0, sc = 0.0;
+    for (int k = 0; k < 9; k++)
+    {
+        float d = float(x0 + k) + 0.5 - p.x;
+        wl[k] = exp(d * d * il);
+        wc[k] = exp(d * d * ic);
+        sl += wl[k];
+        sc += wc[k];
+    }
+
+    // the two nearest DS rows, each a beam
+    float y = p.y - 0.5;
+    float r0 = floor(y);
+    float f = y - r0;
+    vec3 col = vec3(0.0);
+    for (int r = 0; r < 2; r++)
+    {
+        int row = clamp(int(r0) + r, 0, 191);
+        vec3 rgb;
+        if (uSignal)
+        {
+            // the decoded line, between its samples: sample o sits at (o * step + step / 2 + 0.5)
+            // master clocks into the line, a DS pixel being uSigPixelClocks
+            float of = clamp((p.x * uSigPixelClocks - uSigHalfStep - 0.5) / uSigStep, 0.0, uSigWidth - 1.0);
+            rgb = texture(DecodedTex, vec3((of + 0.5) / uSigTexWidth, (float(row) + 0.5) / 192.0, fTexcoord.z)).rgb;
+        }
+        else
+        {
+            float Y = 0.0;
+            vec2 IQ = vec2(0.0);
+            for (int k = 0; k < 9; k++)
+            {
+                vec3 t = texelFetch(YiqTex, ivec3(clamp(x0 + k, 0, 255), row, layer), 0).rgb;
+                Y += t.x * wl[k];
+                IQ += t.yz * wc[k];
+            }
+            Y /= sl;
+            IQ /= sc;
+            rgb = clamp(vec3(Y + 0.956 * IQ.x + 0.621 * IQ.y,
+                             Y - 0.272 * IQ.x - 0.647 * IQ.y,
+                             Y - 1.106 * IQ.x + 1.703 * IQ.y), 0.0, 1.0);
+        }
+        col += beam(pow(rgb, vec3(2.4)), r == 0 ? f : 1.0 - f);
+    }
+    col *= 1.32;
+
+    col += texture(GlowTex, vec3(p / kDSRes, fTexcoord.z)).rgb * uCrtGlow;
+
+    // aperture grille: R G B stripes uCrtMaskPx screen pixels wide
+    float m = mod(floor(maskX / max(uCrtMaskPx, 1.0)), 3.0);
+    vec3 on = vec3(equal(vec3(m), vec3(0.0, 1.0, 2.0)));
+    col *= mix(vec3(mix(1.0, 0.62, uCrtMask)), vec3(mix(1.0, 1.22, uCrtMask)), on);
+
+    // edge darkening, on the curved screen
+    col *= 1.0 - uCrtVignette * pow(clamp(dot(c, c) * 0.5, 0.0, 1.0), 1.5);
+
+    // the edge blend after clamping, so bright pictures get a smooth edge too
+    oColor = vec4(pow(clamp(col * uCrtBoost, 0.0, 1.0) * edge, vec3(1.0 / 2.2)), 1.0);
 }
 )";
 

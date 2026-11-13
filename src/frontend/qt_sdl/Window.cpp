@@ -16,6 +16,8 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include <tuple>
+#include <QGroupBox>
 #include "Trace.h"
 #include "NDS.h"
 #include <stdlib.h>
@@ -610,14 +612,35 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
 
             menu->addSeparator();
 
-            actHelloWindow = menu->addAction("Pixel grid settings...");
+            // One filter at a time, for the whole instance. What draws it follows Config > Video
+            // settings: the OpenGL shaders with an OpenGL display or OpenGL 3D renderer, else the
+            // software filters (the fallback).
+            {
+                menuScreenFilter = menu->addMenu("Screen filter");
+                menuScreenFilter->setToolTipsVisible(true);
+                grpScreenFilter = new QActionGroup(this);
+                const char* names[screenFilter_MAX] = {"Off", "LCD", "CRT"};
+                for (int i = 0; i < screenFilter_MAX; i++)
+                {
+                    actScreenFilter[i] = menuScreenFilter->addAction(names[i]);
+                    actScreenFilter[i]->setCheckable(true);
+                    actScreenFilter[i]->setData(i);
+                    grpScreenFilter->addAction(actScreenFilter[i]);
+                }
+                connect(grpScreenFilter, &QActionGroup::triggered, this, [this](QAction* act)
+                {
+                    onChangeScreenFilter(act->data().toInt());
+                });
 
-            // On or off only. What draws it follows Config > Video settings: the OpenGL shader with
-            // an OpenGL display or OpenGL 3D renderer, else the software filter (the fallback).
-            actPixelGrid = menu->addAction("Pixel grid");
-            actPixelGrid->setCheckable(true);
-            actPixelGrid->setShortcut(QKeySequence(Qt::AltModifier | Qt::Key_F));
-            connect(actPixelGrid, &QAction::triggered, this, &MainWindow::onChangePixelGrid);
+                actToggleScreenFilter = menuScreenFilter->addAction("Turn filter on/off");
+                actToggleScreenFilter->setShortcut(QKeySequence(Qt::AltModifier | Qt::Key_F));
+                actToggleScreenFilter->setToolTip("Switches between Off and the filter used last");
+                connect(actToggleScreenFilter, &QAction::triggered, this, &MainWindow::onToggleScreenFilter);
+
+                menuScreenFilter->addSeparator();
+                actLcdSettings = menuScreenFilter->addAction("LCD filter settings...");
+                actCrtSettings = menuScreenFilter->addAction("CRT filter settings...");
+            }
 
             actShowOSD = menu->addAction("Show OSD");
             actShowOSD->setCheckable(true);
@@ -684,225 +707,288 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
 
         setMenuBar(menubar);
 
-        helloWindow = new HelloWindow(this);
-        helloWindow->setWindowTitle("Pixel grid settings");
+        // screen filter settings windows; each slider writes this window's config and screen
         {
-            // one slider per shader float; changes apply on the next frame
-            auto* grid = new QGridLayout(helloWindow);
-            for (int i = 0; i < kNumGridParams; i++)
+            auto localPath = [](const char* name) { return QString::fromStdString(Platform::GetLocalFilePath(name)); };
+
+            FilterWindowSpec lcd;
+            lcd.title = "LCD filter settings";
+            lcd.filterName = "LCD filter";
+            lcd.params = kGridParams;
+            lcd.count = kNumGridParams;
+            lcd.setParam = [this](int i, float v) { if (panel) panel->gridParam[i] = v; };
+            lcd.setActive = [this](bool on) { onChangeScreenFilter(on ? screenFilter_LCD : screenFilter_Off); };
+            lcd.presetFile = localPath("lcd-presets.json");
+            lcd.legacyPresetFile = localPath("pixelgrid-presets.json");   // before the CRT filter
+            lcd.note = "Imitates the DS's own screens: grid lines between pixels, the LED stripes "
+                       "of each pixel and a light blur.";
+            lcd.addExtras = [this](QWidget* win, QGridLayout* grid, int paramRow, int& row)
             {
-                const GridParamDef& def = kGridParams[i];
-                const int steps = gridParamSteps(def);
-                float val = (float)windowCfg.GetDouble(def.key);
-
-                auto* name = new QLabel(def.name, helloWindow);
-                name->setToolTip(def.tip);
-                auto* slider = new QSlider(Qt::Horizontal, helloWindow);
-                auto* num = new QLabel(helloWindow);
-                slider->setRange(0, steps);
-                slider->setValue(qRound((val - def.min) / (def.max - def.min) * steps));
-                num->setMinimumWidth(48);
-                num->setText(QString::number(val, 'f', def.integer ? 0 : 3));
-
-                connect(slider, &QSlider::valueChanged, this, [this, i, num](int v)
-                {
-                    const GridParamDef& def = kGridParams[i];
-                    float f = def.min + (def.max - def.min) * v / (float)gridParamSteps(def);
-                    num->setText(QString::number(f, 'f', def.integer ? 0 : 3));
-                    windowCfg.SetDouble(def.key, f);
-                    if (panel) panel->gridParam[i] = f;
-                });
-
-                grid->addWidget(name, i, 0);
-                grid->addWidget(slider, i, 1);
-                grid->addWidget(num, i, 2);
-
                 // the blur rows also get their reach, in DS pixels
-                int axis = !strcmp(def.key, "BlurStrengthX") ? 0 : !strcmp(def.key, "BlurStrengthY") ? 1 : -1;
-                if (axis >= 0)
+                QSpinBox* reach[2] = {};
+                for (int i = 0; i < kNumGridParams; i++)
                 {
+                    const char* key = kGridParams[i].key;
+                    int axis = !strcmp(key, "BlurStrengthX") ? 0 : !strcmp(key, "BlurStrengthY") ? 1 : -1;
+                    if (axis < 0) continue;
                     const char* rkey = axis ? "BlurReachY" : "BlurReachX";
-                    auto* reach = new QSpinBox(helloWindow);
-                    reach->setRange(0, 3);
-                    reach->setSuffix(" px");
-                    reach->setToolTip("How many DS pixels away, in this direction, the blur takes colour from (0 to 3).\n"
-                                      "At 1 only the nearest neighbour on each side counts; at 3, three on each side.\n"
-                                      "At 0 this direction isn't blurred, whatever the slider says.");
-                    reach->setValue(windowCfg.GetInt(rkey));
-                    connect(reach, &QSpinBox::valueChanged, this, [this, axis, rkey](int v)
+                    auto* box = new QSpinBox(win);
+                    box->setRange(0, 3);
+                    box->setSuffix(" px");
+                    box->setToolTip("How many DS pixels away, in this direction, the blur takes colour from (0 to 3).\n"
+                                    "At 1 only the nearest neighbour on each side counts; at 3, three on each side.\n"
+                                    "At 0 this direction isn't blurred, whatever the slider says.\n\n"
+                                    "Default: 1 px");
+                    box->setValue(windowCfg.GetInt(rkey));
+                    connect(box, &QSpinBox::valueChanged, this, [this, axis, rkey](int v)
                     {
                         windowCfg.SetInt(rkey, v);
                         if (panel) panel->blurReach[axis] = v;
                     });
-                    grid->addWidget(reach, i, 3);
+                    grid->addWidget(box, paramRow + i, 3);
+                    reach[axis] = box;
                 }
-            }
 
-            // LED stripe layout of the console being imitated
-            auto* layoutRow = new QHBoxLayout();
-            auto* layoutLabel = new QLabel("Subpixels", helloWindow);
-            layoutLabel->setToolTip("Which console's LED stripes to imitate. Each DS pixel is lit by three thin\n"
-                                    "stripes, one per colour, and their order differs between models:\n\n"
-                                    "DS Lite and DSi: blue, green, red, left to right, on both screens.\n"
-                                    "DSi XL: blue, green, red on the top screen, but red, green, blue on the bottom.\n\n"
-                                    "None turns the stripes off. Subpixel strength sets how visible they are.");
-            layoutRow->addWidget(layoutLabel);
-            auto* layoutGroup = new QButtonGroup(helloWindow);
-            const char* layouts[] = {"None", "DS Lite", "DSi", "DSi XL"};
-            for (int i = 0; i < 4; i++)
-            {
-                auto* rb = new QRadioButton(layouts[i], helloWindow);
-                rb->setChecked(windowCfg.GetInt("SubpixelLayout") == i);
-                layoutGroup->addButton(rb, i);
-                layoutRow->addWidget(rb);
-            }
-            layoutRow->addStretch();
-            connect(layoutGroup, &QButtonGroup::idClicked, this, [this](int id)
-            {
-                windowCfg.SetInt("SubpixelLayout", id);
-                if (panel) panel->subpixelLayout = id;
-            });
-            grid->addLayout(layoutRow, kNumGridParams, 0, 1, 4);
+                // LED stripe layout of the console being imitated
+                auto* layoutRow = new QHBoxLayout();
+                auto* layoutLabel = new QLabel("Subpixels", win);
+                layoutLabel->setToolTip("Which console's LED stripes to imitate. Each DS pixel is lit by three thin\n"
+                                        "stripes, one per colour, and their order differs between models:\n\n"
+                                        "DS Lite and DSi: blue, green, red, left to right, on both screens.\n"
+                                        "DSi XL: blue, green, red on the top screen, but red, green, blue on the bottom.\n\n"
+                                        "None turns the stripes off. Subpixel strength sets how visible they are.\n\n"
+                                        "Default: DSi XL");
+                layoutRow->addWidget(layoutLabel);
+                auto* layoutGroup = new QButtonGroup(win);
+                const char* layouts[] = {"None", "DS Lite", "DSi", "DSi XL"};
+                for (int i = 0; i < 4; i++)
+                {
+                    auto* rb = new QRadioButton(layouts[i], win);
+                    rb->setChecked(windowCfg.GetInt("SubpixelLayout") == i);
+                    layoutGroup->addButton(rb, i);
+                    layoutRow->addWidget(rb);
+                }
+                layoutRow->addStretch();
+                connect(layoutGroup, &QButtonGroup::idClicked, this, [this](int id)
+                {
+                    windowCfg.SetInt("SubpixelLayout", id);
+                    if (panel) panel->subpixelLayout = id;
+                });
+                grid->addLayout(layoutRow, row++, 0, 1, 4);
 
-            auto* subBox = new QCheckBox("Subpixel sampling (needs 3x or more internal resolution)", helloWindow);
-            subBox->setObjectName("subpixelSample");
-            subBox->setToolTip("Lets each LED stripe show what's actually under it, the way ClearType does with text.\n\n"
-                               "With the OpenGL renderer at 3x or more internal resolution, the 3D picture has at\n"
-                               "least three samples across each DS pixel. Each stripe then takes its own colour from\n"
-                               "the spot where that stripe sits: blue from the left third, green from the middle,\n"
-                               "red from the right (in the order chosen under Subpixels). That gives about three times\n"
-                               "the horizontal detail in 3D scenes, with faint coloured fringes on hard edges.\n\n"
-                               "Has no effect on 2D graphics, below 3x, or with Subpixels set to None.");
-            subBox->setChecked(windowCfg.GetBool("SubpixelSample"));
-            connect(subBox, &QCheckBox::toggled, this, [this](bool on)
-            {
-                windowCfg.SetBool("SubpixelSample", on);
-                if (panel) panel->subpixelSample = on;
-            });
-            grid->addWidget(subBox, kNumGridParams + 1, 0, 1, 4);
+                auto* subBox = new QCheckBox("Subpixel sampling (needs 3x or more internal resolution)", win);
+                subBox->setToolTip("Lets each LED stripe show what's actually under it, the way ClearType does with text.\n\n"
+                                   "With the OpenGL renderer at 3x or more internal resolution, the 3D picture has at\n"
+                                   "least three samples across each DS pixel. Each stripe then takes its own colour from\n"
+                                   "the spot where that stripe sits: blue from the left third, green from the middle,\n"
+                                   "red from the right (in the order chosen under Subpixels). That gives about three times\n"
+                                   "the horizontal detail in 3D scenes, with faint coloured fringes on hard edges.\n\n"
+                                   "Has no effect on 2D graphics, below 3x, or with Subpixels set to None.\n\n"
+                                   "Default: off");
+                subBox->setChecked(windowCfg.GetBool("SubpixelSample"));
+                connect(subBox, &QCheckBox::toggled, this, [this](bool on)
+                {
+                    windowCfg.SetBool("SubpixelSample", on);
+                    if (panel) panel->subpixelSample = on;
+                });
+                grid->addWidget(subBox, row++, 0, 1, 4);
 
-            // presets: "Default" is the built-in values and can't be deleted;
-            // the rest live in pixelgrid-presets.json next to melonDS.toml
-            auto* presetRow = new QHBoxLayout();
-            auto* presetPick = new QComboBox(helloWindow);
-            auto* presetName = new QLineEdit(helloWindow);
-            auto* presetSave = new QPushButton("Save", helloWindow);
-            auto* presetDelete = new QPushButton("Delete", helloWindow);
-            presetPick->setToolTip("Apply a saved set of these settings");
-            presetName->setPlaceholderText("Preset name");
-            presetSave->setToolTip("Save the current settings under the name in the box");
-            presetDelete->setToolTip("Delete the selected preset (not Default)");
-            presetRow->addWidget(presetPick, 1);
-            presetRow->addWidget(presetName, 1);
-            presetRow->addWidget(presetSave);
-            presetRow->addWidget(presetDelete);
-            grid->addLayout(presetRow, kNumGridParams + 2, 0, 1, 4);
-
-            QString presetFile = QString::fromStdString(Platform::GetLocalFilePath("pixelgrid-presets.json"));
-            auto loadPresets = [presetFile]()
-            {
-                QFile f(presetFile);
-                if (!f.open(QIODevice::ReadOnly)) return QJsonObject();
-                return QJsonDocument::fromJson(f.readAll()).object();
+                FilterExtras ex;
+                ex.toJson = [=]()
+                {
+                    QJsonObject o;
+                    if (reach[0]) o["BlurReachX"] = reach[0]->value();
+                    if (reach[1]) o["BlurReachY"] = reach[1]->value();
+                    o["SubpixelLayout"] = layoutGroup->checkedId();
+                    o["SubpixelSample"] = subBox->isChecked();
+                    return o;
+                };
+                ex.fromJson = [=](const QJsonObject& o)
+                {
+                    if (reach[0]) reach[0]->setValue(o.value("BlurReachX").toInt(1));
+                    if (reach[1]) reach[1]->setValue(o.value("BlurReachY").toInt(1));
+                    if (auto* b = layoutGroup->button(o.value("SubpixelLayout").toInt(3))) b->click();
+                    subBox->setChecked(o.value("SubpixelSample").toBool(false));
+                };
+                return ex;
             };
-            auto refill = [presetPick, loadPresets](const QString& select)
-            {
-                QSignalBlocker b(presetPick);
-                presetPick->clear();
-                presetPick->addItem("Default");
-                for (const QString& n : loadPresets().keys()) presetPick->addItem(n);
-                int i = presetPick->findText(select);
-                presetPick->setCurrentIndex(i < 0 ? 0 : i);
-            };
-            refill(QString());
+            lcdWindow = buildFilterWindow(this, windowCfg, lcd);
 
-            QWidget* hw = helloWindow;
-            auto current = [hw]()
+            FilterWindowSpec crt;
+            crt.title = "CRT filter settings";
+            crt.filterName = "CRT filter";
+            crt.params = kCrtParams;
+            crt.count = kNumCrtParams;
+            crt.setParam = [this](int i, float v) { if (panel) panel->crtParam[i] = v; };
+            crt.setActive = [this](bool on) { onChangeScreenFilter(on ? screenFilter_CRT : screenFilter_Off); };
+            crt.presetFile = localPath("crt-presets.json");
+            crt.note = "Made for whole-number zooms (View > Screen sizing > Force integer scaling): "
+                       "uneven ones give the scanlines a wavy pattern. The defaults suit 3x; at 6x or "
+                       "more, a 2 px mask width keeps one triad per DS pixel.";
+
+            // video signal: which console's encoder and which cable feed the TV. The combo boxes
+            // go at the top of the "Video signal" box; the sliders that don't apply grey out
+            struct SignalUi { QComboBox* console = nullptr; QComboBox* cable = nullptr; QComboBox* decoder = nullptr; };
+            auto sigUi = std::make_shared<SignalUi>();
+            auto updateSignalRows = [this, sigUi]()
+            {
+                if (!crtWindow || !sigUi->console) return;
+                const int con = sigUi->console->currentIndex(), cab = sigUi->cable->currentIndex();
+                const bool chain = con != Ntsc::Console_Off;
+                const bool encoded = chain && cab != Ntsc::Cable_RGB;
+                const bool rf = encoded && cab == Ntsc::Cable_RF;
+                sigUi->cable->setEnabled(chain);
+                sigUi->decoder->setEnabled(encoded);
+                crtWindow->setParamEnabled(crt_LumaBlur, !chain);
+                crtWindow->setParamEnabled(crt_ChromaBlur, !chain);
+                for (int p : {crt_Colour, crt_Tint, crt_Sharpness}) crtWindow->setParamEnabled(p, encoded);
+                for (int p : {crt_Noise, crt_Ghost, crt_GhostDelay}) crtWindow->setParamEnabled(p, rf);
+            };
+            crt.sectionTop = [this, sigUi, updateSignalRows](const char* section, QGroupBox* box, QGridLayout* grid, int& row)
+            {
+                if (strcmp(section, "Video signal") != 0) return;
+                auto* conLabel = new QLabel("Console", box);
+                auto* con = new QComboBox(box);
+                con->addItems({"Off (simple blur)", "Mega Drive, 320 wide (H40)", "Mega Drive, 256 wide (H32)", "SNES"});
+                const QString conTip =
+                    "Which console's video encoder sends the picture to the TV, at that console's timing.\n\n"
+                    "The DS picture is put through the signal the way that console makes it: each pixel\n"
+                    "held for its clock, the colour carrier at its exact frequency and phase. Everything\n"
+                    "you see (colour bleed, rainbows, dithering that blends) comes out of that signal and\n"
+                    "how the TV decodes it, not from effect settings.\n\n"
+                    "Mega Drive, 320 wide: 1.875 pixels per colour cycle, the same on every line, so\n"
+                    "1-pixel dithering sits on the colour carrier: it blends, with still rainbows.\n"
+                    "Mega Drive, 256 wide and SNES: 1.5 pixels per colour cycle. The SNES shifts the\n"
+                    "carrier a third of a cycle each line, so its artifacts run diagonally.\n\n"
+                    "Off: no signal; Picture blur and Colour bleed set a simple sideways blur.\n\n"
+                    "Default: Off";
+                conLabel->setToolTip(conTip); con->setToolTip(conTip);
+                auto* cabLabel = new QLabel("Cable", box);
+                auto* cab = new QComboBox(box);
+                cab->addItems({"RGB", "S-Video", "Composite", "RF"});
+                const QString cabTip =
+                    "How the signal gets to the TV.\n\n"
+                    "RGB: no encoding at all, the sharpest picture.\n"
+                    "S-Video: brightness and colour on separate wires: colour is softer than brightness,\n"
+                    "but there are no rainbows.\n"
+                    "Composite: both on one wire; the TV has to pull them apart, so fine detail turns into\n"
+                    "colour (rainbows) and colour leaks into brightness.\n"
+                    "RF: composite through an aerial lead and tuner: a little softer, and it can add\n"
+                    "noise and a ghost (the RF sliders).\n\n"
+                    "Default: Composite";
+                cabLabel->setToolTip(cabTip); cab->setToolTip(cabTip);
+                {
+                    QSignalBlocker b1(con), b2(cab);
+                    con->setCurrentIndex(std::clamp(windowCfg.GetInt("CrtSignal"), 0, Ntsc::Console_Count - 1));
+                    cab->setCurrentIndex(std::clamp(windowCfg.GetInt("CrtCable"), 0, Ntsc::Cable_Count - 1));
+                }
+                auto* decLabel = new QLabel("TV decoder", box);
+                auto* dec = new QComboBox(box);
+                dec->addItems({"Standard (NTSC)", "Sony, US TV (CXA2025AS)", "Sony, Japanese TV (CXA2025AS)"});
+                const QString decTip =
+                    "How the TV turns the colour signal back into colour.\n\n"
+                    "Standard: the NTSC standard's colour axes, so colours come out as they went in.\n"
+                    "Sony US / Japanese: the axes of Sony's TV decoder IC from its datasheet. US sets\n"
+                    "pushed red and warmed skin tones (reds stronger, yellows toward orange); the\n"
+                    "Japanese setting is milder. Most TVs of the time did something like this.\n\n"
+                    "Not used with RGB.\n\nDefault: Standard (NTSC)";
+                decLabel->setToolTip(decTip); dec->setToolTip(decTip);
+                {
+                    QSignalBlocker b3(dec);
+                    dec->setCurrentIndex(std::clamp(windowCfg.GetInt("CrtDecoder"), 0, Ntsc::Decoder_Count - 1));
+                }
+                connect(dec, &QComboBox::currentIndexChanged, this, [this](int i)
+                {
+                    windowCfg.SetInt("CrtDecoder", i);
+                    if (panel) panel->crtDecoder = i;
+                });
+                connect(con, &QComboBox::currentIndexChanged, this, [this, updateSignalRows](int i)
+                {
+                    windowCfg.SetInt("CrtSignal", i);
+                    if (panel) panel->crtSignal = i;
+                    updateSignalRows();
+                });
+                connect(cab, &QComboBox::currentIndexChanged, this, [this, updateSignalRows](int i)
+                {
+                    windowCfg.SetInt("CrtCable", i);
+                    if (panel) panel->crtCable = i;
+                    updateSignalRows();
+                });
+                grid->addWidget(conLabel, row, 0);
+                grid->addWidget(con, row++, 1, 1, 2);
+                grid->addWidget(cabLabel, row, 0);
+                grid->addWidget(cab, row++, 1, 1, 2);
+                grid->addWidget(decLabel, row, 0);
+                grid->addWidget(dec, row++, 1, 1, 2);
+                sigUi->console = con;
+                sigUi->cable = cab;
+                sigUi->decoder = dec;
+            };
+            crt.addExtras = [sigUi](QWidget*, QGridLayout*, int, int&)
+            {
+                FilterExtras ex;
+                ex.toJson = [sigUi]()
+                {
+                    QJsonObject o;
+                    o["CrtSignal"] = sigUi->console->currentIndex();
+                    o["CrtCable"] = sigUi->cable->currentIndex();
+                    o["CrtDecoder"] = sigUi->decoder->currentIndex();
+                    return o;
+                };
+                ex.fromJson = [sigUi](const QJsonObject& o)
+                {
+                    sigUi->console->setCurrentIndex(std::clamp(o.value("CrtSignal").toInt(0), 0, Ntsc::Console_Count - 1));
+                    sigUi->cable->setCurrentIndex(std::clamp(o.value("CrtCable").toInt(Ntsc::Cable_Composite), 0, Ntsc::Cable_Count - 1));
+                    sigUi->decoder->setCurrentIndex(std::clamp(o.value("CrtDecoder").toInt(Ntsc::Decoder_Standard), 0, Ntsc::Decoder_Count - 1));
+                };
+                return ex;
+            };
+
+            // built-in presets: a console's signal through a fitting TV. A key not listed keeps
+            // its default (Default's tube settings suit a consumer TV at 3x)
+            auto preset = [](std::initializer_list<std::pair<const char*, double>> kv)
             {
                 QJsonObject o;
-                auto sliders = hw->findChildren<QSlider*>();
-                for (int i = 0; i < kNumGridParams && i < sliders.size(); i++)
-                {
-                    const GridParamDef& def = kGridParams[i];
-                    o[def.key] = def.min + (def.max - def.min) * sliders[i]->value() / (double)gridParamSteps(def);
-                }
-                auto reach = hw->findChildren<QSpinBox*>();
-                if (reach.size() >= 2) { o["BlurReachX"] = reach[0]->value(); o["BlurReachY"] = reach[1]->value(); }
-                if (auto* g = hw->findChild<QButtonGroup*>()) o["SubpixelLayout"] = g->checkedId();
-                if (auto* c = hw->findChild<QCheckBox*>("subpixelSample")) o["SubpixelSample"] = c->isChecked();
+                for (const auto& [k, v] : kv) o[k] = v;
                 return o;
             };
-            auto apply = [hw](const QJsonObject& o)
-            {
-                auto sliders = hw->findChildren<QSlider*>();
-                for (int i = 0; i < kNumGridParams && i < sliders.size(); i++)
-                {
-                    const GridParamDef& def = kGridParams[i];
-                    double v = o.value(def.key).toDouble(def.def);
-                    sliders[i]->setValue(qRound((v - def.min) / (def.max - def.min) * gridParamSteps(def)));
-                }
-                auto reach = hw->findChildren<QSpinBox*>();
-                if (reach.size() >= 2)
-                {
-                    reach[0]->setValue(o.value("BlurReachX").toInt(1));
-                    reach[1]->setValue(o.value("BlurReachY").toInt(1));
-                }
-                if (auto* g = hw->findChild<QButtonGroup*>())
-                    if (auto* b = g->button(o.value("SubpixelLayout").toInt(3))) b->click();
-                if (auto* c = hw->findChild<QCheckBox*>("subpixelSample")) c->setChecked(o.value("SubpixelSample").toBool(false));
+            crt.builtins = {
+                {"Mega Drive 2 / Genesis - composite", preset({{"CrtSignal", Ntsc::Console_MDH40}, {"CrtCable", Ntsc::Cable_Composite}})},
+                {"Mega Drive 2 / Genesis - RF", preset({{"CrtSignal", Ntsc::Console_MDH40}, {"CrtCable", Ntsc::Cable_RF},
+                                                        {"CrtNoise", 0.15}, {"CrtGhost", 0.08}, {"CrtGhostDelay", 1.2}})},
+                {"SNES - S-Video", preset({{"CrtSignal", Ntsc::Console_SNES}, {"CrtCable", Ntsc::Cable_SVideo}})},
+                {"SNES - composite", preset({{"CrtSignal", Ntsc::Console_SNES}, {"CrtCable", Ntsc::Cable_Composite}})},
+                {"SNES - composite, US TV", preset({{"CrtSignal", Ntsc::Console_SNES}, {"CrtCable", Ntsc::Cable_Composite},
+                                                    {"CrtDecoder", Ntsc::Decoder_SonyUS}})},
+                {"Sony PVM - RGB", preset({{"CrtSignal", Ntsc::Console_SNES}, {"CrtCable", Ntsc::Cable_RGB},
+                                           {"CrtCurvature", 0.0}, {"CrtBeamMin", 0.16}, {"CrtBeamMax", 0.28},
+                                           {"CrtMask", 0.7}, {"CrtGlow", 0.05}, {"CrtVignette", 0.05}, {"CrtBoost", 1.35}})},
             };
-
-            // activated, not currentTextChanged: picking the entry already shown
-            // (say Default, after moving a slider) applies it again
-            connect(presetPick, &QComboBox::activated, this, [=](int idx)
-            {
-                QString n = presetPick->itemText(idx);
-                presetDelete->setEnabled(n != "Default");
-                presetName->setText(n == "Default" ? QString() : n);
-                apply(n == "Default" ? QJsonObject() : loadPresets().value(n).toObject());
-            });
-            presetDelete->setEnabled(false);
-            connect(presetSave, &QPushButton::clicked, this, [=]()
-            {
-                QString n = presetName->text().trimmed();
-                if (n.isEmpty() || n.compare("Default", Qt::CaseInsensitive) == 0)
-                {
-                    QMessageBox::information(hw, "Pixel grid settings", "Type a name other than Default to save a preset.");
-                    return;
-                }
-                QJsonObject all = loadPresets();
-                all[n] = current();
-                QFile f(presetFile);
-                if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(all).toJson());
-                refill(n);
-                presetDelete->setEnabled(true);
-            });
-            connect(presetDelete, &QPushButton::clicked, this, [=]()
-            {
-                QString n = presetPick->currentText();
-                if (n == "Default") return;
-                QJsonObject all = loadPresets();
-                all.remove(n);
-                QFile f(presetFile);
-                if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(all).toJson());
-                refill(QString());
-                presetName->clear();
-                presetDelete->setEnabled(false);
-            });
-            grid->setColumnStretch(1, 1);
+            crtWindow = buildFilterWindow(this, windowCfg, crt);
+            updateSignalRows();
         }
-        helloWindow->resize(480, 360);
 
-        connect(actHelloWindow, &QAction::triggered, this, [this]()
+        connect(actLcdSettings, &QAction::triggered, this, [this]()
         {
-            helloWindow->show();
-            helloWindow->raise();
-            helloWindow->activateWindow();
+            lcdWindow->show();
+            lcdWindow->raise();
+            lcdWindow->activateWindow();
         });
-        helloWindow->onClosed = [this]()
+        connect(actCrtSettings, &QAction::triggered, this, [this]()
         {
-            saveHelloWindowState();
+            crtWindow->show();
+            crtWindow->raise();
+            crtWindow->activateWindow();
+        });
+        lcdWindow->onClosed = [this]()
+        {
+            windowCfg.SetString("HelloGeometry", lcdWindow->saveGeometry().toBase64().toStdString());
             windowCfg.SetBool("HelloVisible", false);
+        };
+        crtWindow->onClosed = [this]()
+        {
+            windowCfg.SetString("CrtGeometry", crtWindow->saveGeometry().toBase64().toStdString());
+            windowCfg.SetBool("CrtVisible", false);
         };
 
         if (localCfg.GetString("Firmware.Username") == "Arisotura")
@@ -928,13 +1014,16 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
     }
     if (!(id == 0 && MainWindowStartHidden)) show();     // -wo: shown in the workbench
 
-    if (helloWindow)
+    // screen filter settings windows: where they were, and open if they were open
+    for (auto [fw, geomKey, visKey] : {std::tuple{lcdWindow, "HelloGeometry", "HelloVisible"},
+                                       std::tuple{crtWindow, "CrtGeometry", "CrtVisible"}})
     {
-        std::string hgeom = windowCfg.GetString("HelloGeometry");
-        if (!hgeom.empty())
-            helloWindow->restoreGeometry(QByteArray::fromBase64(QByteArray::fromStdString(hgeom)));
-        if (windowCfg.GetBool("HelloVisible"))
-            helloWindow->show();
+        if (!fw) continue;
+        std::string g = windowCfg.GetString(geomKey);
+        if (!g.empty())
+            fw->restoreGeometry(QByteArray::fromBase64(QByteArray::fromStdString(g)));
+        if (windowCfg.GetBool(visKey))
+            fw->show();
     }
 
     panel = nullptr;
@@ -1029,7 +1118,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 actScreenAspectBot[i]->setChecked(true);
         }
 
-        updatePixelGridMenu();
+        updateScreenFilterMenu();
         actShowOSD->setChecked(showOSD);
 
         actLimitFramerate->setChecked(emuInstance->doLimitFPS);
@@ -1082,10 +1171,16 @@ void MainWindow::saveEnabled(bool enabled)
     enabledSaved = true;
 }
 
-void MainWindow::saveHelloWindowState()
+void MainWindow::saveFilterWindowState(bool closing)
 {
-    QByteArray enc = helloWindow->saveGeometry().toBase64();
-    windowCfg.SetString("HelloGeometry", enc.toStdString());
+    // the LCD window keeps the keys it had as the pixel grid window
+    for (auto [fw, geomKey, visKey] : {std::tuple{lcdWindow, "HelloGeometry", "HelloVisible"},
+                                       std::tuple{crtWindow, "CrtGeometry", "CrtVisible"}})
+    {
+        if (!fw) continue;
+        windowCfg.SetString(geomKey, fw->saveGeometry().toBase64().toStdString());
+        if (closing) windowCfg.SetBool(visKey, fw->isVisible());
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -1111,11 +1206,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
         QByteArray enc = geom.toBase64(QByteArray::Base64Encoding);
         windowCfg.SetString("Geometry", enc.toStdString());
     }
-    if (helloWindow)
-    {
-        windowCfg.SetBool("HelloVisible", helloWindow->isVisible());
-        saveHelloWindowState();
-    }
+    saveFilterWindowState(true);
     Config::Save();
 
     emuInstance->deleteWindow(windowID, false);
@@ -1134,10 +1225,10 @@ void MainWindow::createScreenPanel()
     if (oldpanel) delete oldpanel;
 
     // One decision for every window of the instance: a window's OpenGL context is shared
-    // with the first window's, so they must all use OpenGL or none. The OpenGL pixel grid
-    // needs it; the software one draws on the plain display (SoftPixelFilter).
+    // with the first window's, so they must all use OpenGL or none. The OpenGL screen filters
+    // need it; the software ones draw on the plain display (SoftLcdFilter, SoftCrtFilter).
     hasOGL = emuInstance->usesOpenGL();
-    updatePixelGridMenu();
+    updateScreenFilterMenu();
 
     if (hasOGL)
     {
@@ -2504,25 +2595,45 @@ void MainWindow::onOpenNewWindow()
     emuInstance->createWindow();
 }
 
-void MainWindow::updatePixelGridMenu()
+void MainWindow::updateScreenFilterMenu()
 {
-    if (!actPixelGrid) return;
-    actPixelGrid->setChecked(emuInstance->getLocalConfig().GetBool("PixelGrid"));
-    actPixelGrid->setToolTip(hasOGL ? "Drawn by the OpenGL screen shader (Config > Video settings uses OpenGL)"
-                                    : "Drawn in software on the CPU (Config > Video settings uses software)");
+    const int mode = screenFilterSetting(emuInstance->getLocalConfig());
+    if (lcdWindow) lcdWindow->setActive(mode == screenFilter_LCD);
+    if (crtWindow) crtWindow->setActive(mode == screenFilter_CRT);
+    if (!actScreenFilter[mode]) return;
+    actScreenFilter[mode]->setChecked(true);
+    const char* by = hasOGL ? "Drawn by an OpenGL shader (Config > Video settings uses OpenGL)"
+                            : "Drawn in software on the CPU (Config > Video settings uses software)";
+    actScreenFilter[screenFilter_Off]->setToolTip("The plain picture");
+    actScreenFilter[screenFilter_LCD]->setToolTip(QString("Imitates the DS's own LCD screens.\n") + by);
+    actScreenFilter[screenFilter_CRT]->setToolTip(QString("Imitates an old CRT television.\n") + by);
 }
 
-void MainWindow::onChangePixelGrid(bool checked)
+void MainWindow::onChangeScreenFilter(int mode)
 {
     // one setting for all windows of the instance; each screen keeps its implementation
-    emuInstance->getLocalConfig().SetBool("PixelGrid", checked);
+    mode = std::clamp(mode, 0, (int)screenFilter_MAX - 1);
+    Config::Table& local = emuInstance->getLocalConfig();
+    // the filter Alt+F brings back: the one being turned off, or the one being turned on
+    int cur = screenFilterSetting(local);
+    if (cur != screenFilter_Off) local.SetInt("ScreenFilterLast", cur);
+    if (mode != screenFilter_Off) local.SetInt("ScreenFilterLast", mode);
+    local.SetInt("ScreenFilterMode", mode);
     Config::Save();
     for (int i = 0; i < kMaxWindows; i++)
         if (auto* w = emuInstance->getWindow(i))
         {
-            if (w->panel) w->panel->setPixelGrid(checked);
-            w->updatePixelGridMenu();
+            if (w->panel) w->panel->setScreenFilter(mode);
+            w->updateScreenFilterMenu();
         }
+}
+
+void MainWindow::onToggleScreenFilter()
+{
+    Config::Table& local = emuInstance->getLocalConfig();
+    int last = local.GetInt("ScreenFilterLast");
+    if (last <= screenFilter_Off || last >= screenFilter_MAX) last = screenFilter_LCD;
+    onChangeScreenFilter(screenFilterSetting(local) == screenFilter_Off ? last : (int)screenFilter_Off);
 }
 
 void MainWindow::onChangeScreenFiltering(bool checked)

@@ -168,24 +168,133 @@ PYTHONPATH=tools/workbench/python python3 -m dswb --session \
 
 More: `tools/workbench/README.md` (API reference).
 
-## Pixel grid
+## Screen filters
 
-View > **Pixel grid** (Alt+F) draws the DS screens the way a real DS screen looks: thin lines
-between pixels, the coloured LED stripes of each pixel (DS Lite, DSi or DSi XL layout) and an
-optional blur. View > **Pixel grid settings...** sets how dark the lines are, the stripe
-layout and strength, and the blur. The setting applies to every window of an instance.
+View > **Screen filter** picks how the DS screens are drawn: **Off**, **LCD** or **CRT**. One
+filter is on at a time, and the choice applies to every window of an instance. **Turn filter
+on/off** (Alt+F) switches between Off and the filter used last.
 
-What draws it follows Config > **Video settings**:
+Each filter has its own settings window, also under View > Screen filter. At the top of each,
+**Use the LCD/CRT filter** turns that filter on (unticking it turns the screen filter off); the
+settings can be changed whether or not it is on. Every slider's tooltip says what it does and its
+default. The preset row saves and applies named sets of settings (`lcd-presets.json` and
+`crt-presets.json` next to `melonDS.toml`; presets saved under the old pixel grid name are
+carried over). Picking **Default** always restores the built-in values, even when it is the only
+entry.
+
+### LCD filter
+
+Draws the DS screens the way a real DS screen looks: thin lines between pixels, the coloured LED
+stripes of each pixel (DS Lite, DSi or DSi XL layout) and an optional blur. Its settings set how
+dark the lines are, the stripe layout and strength, and the blur.
+
+### CRT filter
+
+Draws the screens like an old CRT television, after the shader in spritecook.ai's "CRT shader for
+pixel art": a sideways-only signal blur in YIQ (sharp brightness, softer colour, so 1-pixel
+dithering melts into an even shade), Gaussian scanlines that widen on bright pixels, an
+aperture-grille mask of red, green and blue stripes in screen pixels, glow, edge darkening and
+screen curvature. Its settings: curvature, picture blur, colour bleed, the scanline width on dark
+and on bright pixels, mask strength and width, glow, edge darkening and brightness.
+
+It is made for whole-number zooms (View > Screen sizing > Force integer scaling); uneven zooms
+give the scanlines a wavy pattern. The defaults are tuned for 3x, the usual zoom: a 1 px mask puts
+one red-green-blue triad on each DS pixel, and Brightness 1.25 with Glow 0.15 keeps mid-tones about
+as bright as without the filter instead of washing out the bright screens DS games tend to have
+(the article's values, Brightness 1.5 and Glow 0.26, suit darker pixel art). At 6x or more, set
+the mask width to 2. The edge of the curved screen is antialiased.
+
+#### Video signal
+
+The CRT settings' **Video signal** section sends the DS picture to the TV the way a real
+console's video encoder would. The signal is simulated at the console's master clock and decoded
+the way a consumer NTSC TV decodes it. Colour bleed, rainbows on fine detail and dithering that
+blends into solid colour all come out of that simulation, not from effect sliders. It is off by
+default, which gives the simple blur set by Picture blur and Colour bleed.
+
+* **Console:** whose encoder and timing.
+  * **Mega Drive, 320 wide (H40):** 1.875 DS pixels per colour cycle. That is the frequency of
+    1-pixel dithering, so dithering blends and turns into colour. Every line is exactly 228
+    carrier cycles, so the artifacts stand still.
+  * **Mega Drive, 256 wide (H32):** 1.5 DS pixels per colour cycle, also still.
+  * **SNES:** 1.5 DS pixels per colour cycle. The carrier moves a third of a cycle per line, so
+    the artifacts run diagonally. Every other frame has a short line, so the pattern alternates
+    between two frames.
+* **Cable:** RGB (no encoding), S-Video (colour softer than brightness, no rainbows), Composite,
+  or RF (composite through a tuner, with optional noise and a ghost).
+* **TV decoder:**
+  * the NTSC standard's colour axes;
+  * the "red push" axes of Sony's CXA2025AS TV decoder, US or Japanese setting.
+* **TV controls:** Colour, Tint and Sharpness, as on the set.
+
+Built-in presets sit under Default in the preset list. They can't be overwritten; save your own
+variants under new names.
+
+* Mega Drive 2 / Genesis - composite
+* Mega Drive 2 / Genesis - RF
+* SNES - S-Video
+* SNES - composite
+* SNES - composite, US TV
+* Sony PVM - RGB
+
+What the simulation is built on:
+
+* **Timing** (fullsnes; SNESdev wiki; SpritesMind and nesdev forum measurements):
+  * Mega Drive: master clock 53.693175 MHz; carrier = master/15; pixels = master/8 (H40) or
+    master/10 (H32); 3420 clocks per line.
+  * SNES: master clock 21.47727 MHz; carrier = master/6; pixels = master/4; 1364 clocks per line,
+    with a 1360-clock line every other frame.
+* **Mega Drive 2 encoder:** the Sony CXA1645 datasheet:
+  * standard colour axes and luma;
+  * a chroma band-pass after the modulator;
+  * the recommended 3.65 MHz luma trap on the composite output;
+  * a luma delay line.
+* **SNES encoder:** the SMPTE 170M colour-difference filter template. The board's own filter
+  values aren't documented.
+* **TV:** a 3.58 MHz luma trap and a ±0.5 MHz chroma band-pass. It demodulates against the colour
+  burst as received, as a TV does.
+* **Exactness:** the chain is linear, so it is computed once per setting as each output sample's
+  weights over nearby pixels. Applying those weights gives the simulation's result to within
+  1/10000 (tested), on both OpenGL and the CPU.
+
+Not simulated, because the hardware isn't documented well enough to do it accurately:
+
+* the early Mega Drive 2 boards' Samsung KA2195D encoder (the blurriest ones);
+* the Mega Drive 1's discrete filters;
+* the NES, which builds its signal from palette numbers, not from RGB;
+* PAL;
+* comb-filter TVs (these consoles' lines don't alternate carrier phase the way a comb filter
+  needs).
+
+The absolute carrier phase of the first pixel isn't documented either. It only shifts the hue
+of the artifact colours.
+
+### What draws them
+
+What draws a filter follows Config > **Video settings**:
 
 * an OpenGL display, or the OpenGL (Classic) or OpenGL (Compute shader) renderer: the OpenGL
-  screen shader;
-* the Software renderer without the OpenGL display: a software version of the same filter,
-  on the CPU. It is the fallback, so the grid works without OpenGL; it looks the same at
+  screen shaders. The CRT one does the work that depends only on DS pixels (the colour signal and
+  the glow) once per frame at 256x192, so the per-pixel pass reads 19 texels instead of 43;
+* the Software renderer without the OpenGL display: software versions of the same filters, on
+  the CPU. They are the fallback, so the filters work without OpenGL; they look the same at
   whole-number zooms.
 
-The software filter runs on 2 threads by default, one per screen. More threads split each screen
-into bands of rows: set `PixelGridThreads` under `[Instance0]` in `melonDS.toml`. At 4x zoom with
-the DSi XL stripes and blur it takes about 9 ms per frame on 2 threads, about 4 ms on 7.
+The software filters use half the logical cores, 2 to 4 threads, by default. To set the number,
+put `PixelGridThreads` under `[Instance0]` in `melonDS.toml` (0 means automatic). Per frame, for
+both screens:
+
+| Filter | Zoom | 2 threads | 4 threads |
+|---|---|---|---|
+| LCD (DSi XL stripes and blur) | 4x | 2.6 ms | 1.4 ms |
+| CRT, flat (curvature 0) | 3x | 3.7 ms | 2.1 ms |
+| CRT, curved (the default) | 3x | 8.6 ms | 4.6 ms |
+| CRT, flat (curvature 0) | 4x | 6.0 ms | 3.2 ms |
+| CRT, curved (the default) | 4x | 14.1 ms | 7.4 ms |
+
+A console's video signal on the CPU costs about 3 ms per screen on one thread, split across the
+threads with the rest. On OpenGL it is a small extra pass. A screen the layout doesn't show (Top
+only, Bottom only) isn't filtered.
 
 ## Credits
 
