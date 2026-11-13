@@ -798,11 +798,96 @@ ScreenPanelNative::ScreenPanelNative(QWidget* parent) : ScreenPanel(parent)
     screenTrans[0].reset();
     screenTrans[1].reset();
 
-    // the plain display draws the pixel grid with the software filter (made when first needed)
+    filterThread = std::thread([this]() { filterMain(); });
 }
 
 ScreenPanelNative::~ScreenPanelNative()
 {
+    {
+        std::lock_guard<std::mutex> l(filterLock);
+        filterQuit = true;
+    }
+    filterWake.notify_one();
+    filterThread.join();
+}
+
+void ScreenPanelNative::filterMain()
+{
+    QImage src[2] = {QImage(256, 192, QImage::Format_RGB32), QImage(256, 192, QImage::Format_RGB32)};
+    QImage out[2];
+    for (;;)
+    {
+        int n;
+        unsigned layers;
+        {
+            std::unique_lock<std::mutex> l(filterLock);
+            filterWake.wait(l, [this] { return filterQuit || filterPending; });
+            if (filterQuit) return;
+            filterPending = false;
+            n = filterZoom;
+            layers = filterLayers;
+        }
+        const int mode = screenFilter;
+        if (mode == screenFilter_Off || !layers) continue;
+
+        // the emulated pixels: the emulator's front buffers, under the locks paintEvent took for them
+        emuInstance->renderLock.lock();
+        bufferLock.lock();
+        bool have = hasBuffers;
+        if (have)
+        {
+            memcpy(src[0].scanLine(0), topBuffer, 256 * 192 * 4);
+            memcpy(src[1].scanLine(0), bottomBuffer, 256 * 192 * 4);
+        }
+        bufferLock.unlock();
+        emuInstance->renderLock.unlock();
+        if (!have) continue;
+
+        for (int k = 0; k < 2; k++)
+            if (out[k].width() != 256 * n)
+                out[k] = QImage(256 * n, 192 * n, QImage::Format_RGB32);
+        const uint32_t* s[2] = {(const uint32_t*)src[0].constBits(), (const uint32_t*)src[1].constBits()};
+        uint32_t* d[2] = {(uint32_t*)out[0].bits(), (uint32_t*)out[1].bits()};
+        // threads for the software filters: PixelGridThreads, or 0 for half the logical cores,
+        // 2 to 4 (the emulator itself needs the rest)
+        int threads = emuInstance->getLocalConfig().GetInt("PixelGridThreads");
+        if (threads <= 0) threads = std::clamp((int)std::thread::hardware_concurrency() / 2, 2, 4);
+
+        // shortcut: the filter settings are read while the settings window may change them (a frame
+        // with half-updated values at worst); copy them under a lock if that ever shows
+        if (mode == screenFilter_LCD)
+        {
+            if (!lcdFilter) lcdFilter = std::make_unique<SoftLcdFilter>(threads);
+            SoftFilterParams p;
+            p.grid = true;
+            p.gridDark = gridParam[0]; p.gridDarkH = gridParam[1]; p.gridWidth = gridParam[2]; p.gridSoft = gridParam[3];
+            p.subStrength = gridParam[4]; p.subKeep = gridParam[5];
+            p.blurX = gridParam[6]; p.blurY = gridParam[7]; p.halo = gridParam[8];
+            p.blurReachX = blurReach[0]; p.blurReachY = blurReach[1];
+            p.subpixel = subpixelLayout;
+            lcdFilter->process(s, d, (int)out[0].bytesPerLine(), n, p, layers);
+        }
+        else
+        {
+            if (!crtFilter) crtFilter = std::make_unique<SoftCrtFilter>(threads);
+            SoftCrtParams p;
+            p.curvature = crtParam[crt_Curvature]; p.lumaBlur = crtParam[crt_LumaBlur]; p.chromaBlur = crtParam[crt_ChromaBlur];
+            p.beamMin = crtParam[crt_BeamMin]; p.beamMax = crtParam[crt_BeamMax];
+            p.mask = crtParam[crt_Mask]; p.maskPx = crtParam[crt_MaskPx];
+            p.glow = crtParam[crt_Glow]; p.vignette = crtParam[crt_Vignette]; p.boost = crtParam[crt_Boost];
+            p.signal = signalSettings();
+            p.frame = emuInstance->getNDS() ? emuInstance->getNDS()->NumFrames : 0;
+            crtFilter->process(s, d, (int)out[0].bytesPerLine(), n, p, layers);
+        }
+
+        {
+            std::lock_guard<std::mutex> l(filterLock);
+            std::swap(out[0], filtered[0]);
+            std::swap(out[1], filtered[1]);
+            filteredValid = true;
+        }
+        QMetaObject::invokeMethod(this, [this]() { update(); }, Qt::QueuedConnection);
+    }
 }
 
 void ScreenPanelNative::setupScreenLayout()
@@ -833,6 +918,15 @@ void ScreenPanelNative::drawScreen()
     bufferLock.lock();
     hasBuffers = nds->GPU.GetFramebuffers(&topBuffer, &bottomBuffer);
     bufferLock.unlock();
+    // a new frame for this panel's filter thread
+    if (screenFilter != screenFilter_Off)
+    {
+        {
+            std::lock_guard<std::mutex> l(filterLock);
+            filterPending = true;
+        }
+        filterWake.notify_one();
+    }
 }
 
 void ScreenPanelNative::paintEvent(QPaintEvent* event)
@@ -861,7 +955,8 @@ void ScreenPanelNative::paintEvent(QPaintEvent* event)
 
         static_assert(kNumGridParams == 9 && kNumCrtParams == crt_Count, "the soft filter params below are filled by index");
         const int mode = screenFilter;     // Off: the plain picture
-        const bool useSoft = mode != screenFilter_Off;
+        bool useSoft = mode != screenFilter_Off;
+        QImage shown[2];
         if (useSoft)
         {
             // filter at the whole zoom closest to the screen's size in device pixels, so the
@@ -870,49 +965,27 @@ void ScreenPanelNative::paintEvent(QPaintEvent* event)
             const QTransform& t = screenTrans[0];
             float scale = std::sqrt(float(t.m11() * t.m11() + t.m12() * t.m12())) * devicePixelRatioF();
             int n = std::clamp((int)std::lround(scale), 1, 16);
-            for (int k = 0; k < 2; k++)
-                if (filtered[k].width() != 256 * n)
-                    filtered[k] = QImage(256 * n, 192 * n, QImage::Format_RGB32);
             // only the screens the layout shows
             unsigned layers = 0;
             for (int i = 0; i < numScreens; i++) layers |= 1u << screenKind[i];
-            const uint32_t* src[2] = {(const uint32_t*)screen[0].constBits(), (const uint32_t*)screen[1].constBits()};
-            uint32_t* dst[2] = {(uint32_t*)filtered[0].bits(), (uint32_t*)filtered[1].bits()};
-            // threads for the software filters: PixelGridThreads, or 0 for half the logical cores,
-            // 2 to 4 (the emulator itself needs the rest)
-            int threads = emuInstance->getLocalConfig().GetInt("PixelGridThreads");
-            if (threads <= 0) threads = std::clamp((int)std::thread::hardware_concurrency() / 2, 2, 4);
-
-            if (mode == screenFilter_LCD)
+            bool changed;
             {
-                if (!lcdFilter) lcdFilter = std::make_unique<SoftLcdFilter>(threads);
-                SoftFilterParams p;
-                p.grid = true;
-                p.gridDark = gridParam[0]; p.gridDarkH = gridParam[1]; p.gridWidth = gridParam[2]; p.gridSoft = gridParam[3];
-                p.subStrength = gridParam[4]; p.subKeep = gridParam[5];
-                p.blurX = gridParam[6]; p.blurY = gridParam[7]; p.halo = gridParam[8];
-                p.blurReachX = blurReach[0]; p.blurReachY = blurReach[1];
-                p.subpixel = subpixelLayout;
-                lcdFilter->process(src, dst, (int)filtered[0].bytesPerLine(), n, p, layers);
+                std::lock_guard<std::mutex> l(filterLock);
+                changed = n != filterZoom || layers != filterLayers || !filteredValid;
+                filterZoom = n;
+                filterLayers = layers;
+                if (changed) filterPending = true;      // re-filter now (paused, zoom changed)
+                // the filter thread's latest images; the plain picture until there is one
+                if (filteredValid) { shown[0] = filtered[0]; shown[1] = filtered[1]; }
+                else useSoft = false;
             }
-            else
-            {
-                if (!crtFilter) crtFilter = std::make_unique<SoftCrtFilter>(threads);
-                SoftCrtParams p;
-                p.curvature = crtParam[crt_Curvature]; p.lumaBlur = crtParam[crt_LumaBlur]; p.chromaBlur = crtParam[crt_ChromaBlur];
-                p.beamMin = crtParam[crt_BeamMin]; p.beamMax = crtParam[crt_BeamMax];
-                p.mask = crtParam[crt_Mask]; p.maskPx = crtParam[crt_MaskPx];
-                p.glow = crtParam[crt_Glow]; p.vignette = crtParam[crt_Vignette]; p.boost = crtParam[crt_Boost];
-                p.signal = signalSettings();
-                p.frame = emuInstance->getNDS() ? emuInstance->getNDS()->NumFrames : 0;
-                crtFilter->process(src, dst, (int)filtered[0].bytesPerLine(), n, p, layers);
-            }
+            if (changed) filterWake.notify_one();
         }
 
         for (int i = 0; i < numScreens; i++)
         {
             painter.setTransform(screenTrans[i]);
-            painter.drawImage(screenrc, useSoft ? filtered[screenKind[i]] : screen[screenKind[i]]);
+            painter.drawImage(screenrc, useSoft ? shown[screenKind[i]] : screen[screenKind[i]]);
         }
         if (hasBuffers && mainWindow->isVisible() && !shownTraced)
         {

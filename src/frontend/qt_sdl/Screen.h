@@ -26,6 +26,9 @@
 
 #include <QWidget>
 #include <memory>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 #include "SoftLcdFilter.h"
 #include "SoftCrtFilter.h"
 #include "NtscSignal.h"
@@ -254,10 +257,20 @@ private:
     void* bottomBuffer;
 
     QImage screen[2];
-    // software screen filters: the shaders' look without OpenGL
-    std::unique_ptr<SoftLcdFilter> lcdFilter;
+    // software screen filters: the shaders' look without OpenGL. Each panel filters on its own thread
+    // (filterMain), woken by drawScreen for every frame: it copies the emulated pixels and filters them,
+    // and the GUI thread only draws the result, so two windows filter on two cores at once
+    void filterMain();
+    std::unique_ptr<SoftLcdFilter> lcdFilter;   // used by the filter thread only
     std::unique_ptr<SoftCrtFilter> crtFilter;
-    QImage filtered[2];
+    std::thread filterThread;
+    std::mutex filterLock;                      // guards the fields below
+    std::condition_variable filterWake;
+    bool filterQuit = false, filterPending = false;
+    int filterZoom = 1;                         // set by paintEvent: the whole zoom to filter at
+    unsigned filterLayers = 0;                  // and the screens the layout shows
+    QImage filtered[2];                         // the latest finished images (swapped in by the filter thread)
+    bool filteredValid = false;
     QTransform screenTrans[kMaxScreenTransforms];
 };
 
