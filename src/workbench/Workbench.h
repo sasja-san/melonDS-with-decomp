@@ -534,6 +534,10 @@ class Recorder
 {
 public:
     explicit Recorder(Workbench& wb);
+#ifdef MELONDS_TRACE_RECORDING
+    // per-frame counts for the Tracy "recording" category, plotted and cleared by OnFrameEnd
+    u64 TraceExec = 0, TraceRead = 0, TraceWrite = 0, TraceHistory = 0, TraceDMA = 0;
+#endif
 
     void Reset();                           // clears all recorded data
     void SetEnabled(bool on);

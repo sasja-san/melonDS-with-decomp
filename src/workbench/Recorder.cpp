@@ -16,6 +16,7 @@
     with melonDS. If not, see http://www.gnu.org/licenses/.
 */
 
+#include "../frontend/qt_sdl/Trace.h"
 #include <algorithm>
 #include <cstring>
 #include "Workbench.h"
@@ -37,6 +38,7 @@ Recorder::Recorder(Workbench& wb) : WB(wb)
 
 void Recorder::Reset()
 {
+    TRACE_RECORDING("recording: reset");
     Records.Clear();
     if (!Ext)
     {
@@ -97,6 +99,7 @@ void Recorder::NoteEntry(u32 cpu, u32 addr, bool thumb)
 
 void Recorder::ScanExecutedPrologues()
 {
+    TRACE_RECORDING("recording: scan executed prologues");
     if (PrologueScanned) return;
     PrologueScanned = true;
     for (int c = 0; c < 2; c++)
@@ -147,6 +150,7 @@ bool Recorder::TakeEntries(std::vector<ObservedEntry>& out)
 
 void Recorder::SetEnabled(bool on)
 {
+    TRACE_RECORDING("recording: on/off");
     if (on == On) return;
     if (on)
     {
@@ -180,6 +184,7 @@ void Recorder::SetWriteHistory(bool on)
 
 void Recorder::SetHistoryStorage(WriteHistoryEntry* buffer, u64 entries)
 {
+    TRACE_RECORDING("recording: history storage");
     History.clear();
     History.shrink_to_fit();
     Ext = buffer;
@@ -382,6 +387,7 @@ void Recorder::VerifyOverlay(u32 cpu, u32 pc)
 
 void Recorder::MarkOverlayLoaded(u32 cpu, u32 id, u8 kind)
 {
+    TRACE_RECORDING("recording: overlay loaded");
     const OverlayInfo* ov = WB.Rom.Overlay(cpu, id);
     if (!ov || (ov->RamStart >> 24) != 0x02) return;
     u32 mask = WB.GetNDS() ? WB.GetNDS()->MainRAMMask : 0x3FFFFF;
@@ -483,6 +489,9 @@ static inline void ClassData(ByteRecord& r)
 
 void Recorder::OnExec(u32 cpu, u32 pc, bool thumb)
 {
+#ifdef MELONDS_TRACE_RECORDING
+    TraceExec++;
+#endif
     // finish a BIOS decompression when control returns to the caller
     if (Decomp[cpu].Active && pc == Decomp[cpu].ReturnAddr)
     {
@@ -721,6 +730,7 @@ void Recorder::FlushTransfer(OpenTransfer& t)
 
 void Recorder::FlushTransfers()
 {
+    TRACE_RECORDING("recording: flush transfers");
     for (auto& t : CardCopy) FlushTransfer(t);
     for (auto& t : DmaOpen) FlushTransfer(t);
     for (auto& t : CpuCopy) FlushCopy(t);
@@ -864,6 +874,9 @@ void Recorder::HandleCardWordStored(u32 cpu, u32 dst, u32 dstsize, PhysAddr pa, 
 
 void Recorder::OnRead(u32 cpu, u32 addr, u32 size, u32 value)
 {
+#ifdef MELONDS_TRACE_RECORDING
+    TraceRead++;
+#endif
     (void)value;
     if (addr == CardDataPort && size == 4)
     {
@@ -916,6 +929,9 @@ void Recorder::OnRead(u32 cpu, u32 addr, u32 size, u32 value)
 
 void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa)
 {
+#ifdef MELONDS_TRACE_RECORDING
+    TraceWrite++;
+#endif
     PendingDecompress& d = Decomp[cpu];
     if (d.Active)
     {
@@ -958,6 +974,9 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
         e.size = (u8)size;
         e.region = pa.Region;
         PushHistory(e);
+#ifdef MELONDS_TRACE_RECORDING
+        TraceHistory++;
+#endif
     }
 
     RecordPage* p = PageFor(cpu, addr, WriteCache[cpu], true);
@@ -985,6 +1004,10 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
 
 void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value)
 {
+    TRACE_RECORDING("recording: DMA");
+#ifdef MELONDS_TRACE_RECORDING
+    TraceDMA++;
+#endif
     u32 dcpu = cpu ? 3 : 2;   // DMA address space of that CPU
     PhysAddr dpa = WB.Translate(dcpu, dst);
     if (On && (InOverlaySpan(0, dst) || InOverlaySpan(1, dst)))
@@ -1127,6 +1150,7 @@ void Recorder::OnTcmChange(u32 itcmsize, u32 dtcmbase, u32 dtcmsize)
 
 void Recorder::OnBootLoad()
 {
+    TRACE_RECORDING("recording: boot load");
     if (!On || !WB.Rom.Valid()) return;
     auto add = [&](u32 cpu, u32 fileid, u32 romoff, u32 ram, u32 size)
     {
@@ -1151,6 +1175,16 @@ void Recorder::OnBootLoad()
 
 void Recorder::OnFrameEnd()
 {
+    TRACE_RECORDING("recording: frame end");
+#ifdef MELONDS_TRACE_RECORDING
+    // one point per emulated frame on each graph
+    TRACE_RECORDING_PLOT("recording: instructions/frame", TraceExec);
+    TRACE_RECORDING_PLOT("recording: reads/frame", TraceRead);
+    TRACE_RECORDING_PLOT("recording: writes/frame", TraceWrite);
+    TRACE_RECORDING_PLOT("recording: history entries/frame", TraceHistory);
+    TRACE_RECORDING_PLOT("recording: DMAs/frame", TraceDMA);
+    TraceExec = TraceRead = TraceWrite = TraceHistory = TraceDMA = 0;
+#endif
     if (!On) return;
     EndFrame = WB.Frame();
     for (auto& t : CpuCopy) FlushCopy(t);

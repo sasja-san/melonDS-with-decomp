@@ -322,7 +322,7 @@ void EmuThread::run()
                     static bool firstStart = true;      // a landmark on the startup timeline
                     if (firstStart) { firstStart = false; TRACE_QT_MESSAGE("first emulated frame starts"); }
                 }
-                nlines = emuInstance->nds->RunFrame();
+                { TRACE_RECORDING("emulated frame"); nlines = emuInstance->nds->RunFrame(); }
             }
 
             if (emuInstance->ndsSave)

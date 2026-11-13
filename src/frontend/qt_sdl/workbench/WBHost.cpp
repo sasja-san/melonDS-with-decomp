@@ -1383,6 +1383,7 @@ void WBHost::OnCoreEvent(const WBEvent& ev)
 
 void WBHost::StartRecordingNow()
 {
+    TRACE_RECORDING("recording: start (GUI side)");
     // emulation thread
     if (WB.Rec.Enabled() || WB.JITActive() || !WB.GetNDS()) return;
     ApplyHistoryFile(nullptr);      // the last session took its history file along
@@ -2140,6 +2141,7 @@ std::shared_ptr<const SavedHistory> WBHost::OpenSavedHistory(const QString& path
 
 void WBHost::FinishSession(bool keepRecording)
 {
+    TRACE_RECORDING("recording: save session");
     if (!WB.Rec.Enabled()) return;
     RefreshFuncSnapshot();
     auto cs = std::make_shared<CollectedSession>();

@@ -20,7 +20,7 @@
 #define TRACE_H
 
 // Tracy profiling, by category, chosen at compile time with the CMake list MELONDS_TRACE
-// (all, qt, emu, render, sdl_startup). A category that is off compiles to nothing; with none on, Tracy
+// (all, qt, emu, render, sdl_startup, recording). A category that is off compiles to nothing; with none on, Tracy
 // isn't built in at all. The client is vendored in vendor/tracy (see VENDORED.md).
 //
 //   TRACE_QT("name")            a zone: this scope, timed, shown as one bar in the viewer
@@ -30,9 +30,11 @@
 //   TRACE_QT_STEPS()            ends the last step when this scope exits (functions with early returns);
 //                               one function with steps at a time per thread: steps don't nest
 //   TRACE_QT_MESSAGE("text")    a marker on the timeline
-// and the same for EMU, RENDER and SDL_STARTUP (SDL set up and shut down by main()).
+//   TRACE_QT_PLOT("name", v)    a value on a graph in the viewer (one point per call)
+// and the same for EMU, RENDER, SDL_STARTUP (SDL set up and shut down by main()) and RECORDING (the
+// workbench recorder: its work, and per frame how many executions, reads, writes and history entries).
 
-#if defined(MELONDS_TRACE_QT) || defined(MELONDS_TRACE_EMU) || defined(MELONDS_TRACE_RENDER) || defined(MELONDS_TRACE_SDL_STARTUP)
+#if defined(MELONDS_TRACE_QT) || defined(MELONDS_TRACE_EMU) || defined(MELONDS_TRACE_RENDER) || defined(MELONDS_TRACE_SDL_STARTUP) || defined(MELONDS_TRACE_RECORDING)
 #include "tracy/Tracy.hpp"
 #include "tracy/TracyC.h"
 
@@ -57,6 +59,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_STEP_END_() Trace::StepEnd()
 #define TRACE_STEPS_() Trace::StepScope TracyConcat(traceSteps, TracyLine)
 #define TRACE_MESSAGE_(text) TracyMessageL(text)
+#define TRACE_PLOT_(name, value) TracyPlot(name, (int64_t)(value))
 #endif
 
 #define TRACE_OFF_(...) do {} while (0)
@@ -68,6 +71,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_QT_STEP_END() TRACE_STEP_END_()
 #define TRACE_QT_STEPS() TRACE_STEPS_()
 #define TRACE_QT_MESSAGE(text) TRACE_MESSAGE_(text)
+#define TRACE_QT_PLOT(name, value) TRACE_PLOT_(name, value)
 #else
 #define TRACE_QT(name) TRACE_OFF_()
 #define TRACE_QT_NAMED(text) TRACE_OFF_()
@@ -75,6 +79,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_QT_STEP_END() TRACE_OFF_()
 #define TRACE_QT_STEPS() TRACE_OFF_()
 #define TRACE_QT_MESSAGE(text) TRACE_OFF_()
+#define TRACE_QT_PLOT(name, value) TRACE_OFF_()
 #endif
 
 #ifdef MELONDS_TRACE_EMU
@@ -84,6 +89,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_EMU_STEP_END() TRACE_STEP_END_()
 #define TRACE_EMU_STEPS() TRACE_STEPS_()
 #define TRACE_EMU_MESSAGE(text) TRACE_MESSAGE_(text)
+#define TRACE_EMU_PLOT(name, value) TRACE_PLOT_(name, value)
 #else
 #define TRACE_EMU(name) TRACE_OFF_()
 #define TRACE_EMU_NAMED(text) TRACE_OFF_()
@@ -91,6 +97,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_EMU_STEP_END() TRACE_OFF_()
 #define TRACE_EMU_STEPS() TRACE_OFF_()
 #define TRACE_EMU_MESSAGE(text) TRACE_OFF_()
+#define TRACE_EMU_PLOT(name, value) TRACE_OFF_()
 #endif
 
 #ifdef MELONDS_TRACE_RENDER
@@ -100,6 +107,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_RENDER_STEP_END() TRACE_STEP_END_()
 #define TRACE_RENDER_STEPS() TRACE_STEPS_()
 #define TRACE_RENDER_MESSAGE(text) TRACE_MESSAGE_(text)
+#define TRACE_RENDER_PLOT(name, value) TRACE_PLOT_(name, value)
 #else
 #define TRACE_RENDER(name) TRACE_OFF_()
 #define TRACE_RENDER_NAMED(text) TRACE_OFF_()
@@ -107,6 +115,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_RENDER_STEP_END() TRACE_OFF_()
 #define TRACE_RENDER_STEPS() TRACE_OFF_()
 #define TRACE_RENDER_MESSAGE(text) TRACE_OFF_()
+#define TRACE_RENDER_PLOT(name, value) TRACE_OFF_()
 #endif
 
 #ifdef MELONDS_TRACE_SDL_STARTUP
@@ -116,6 +125,7 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_SDL_STARTUP_STEP_END() TRACE_STEP_END_()
 #define TRACE_SDL_STARTUP_STEPS() TRACE_STEPS_()
 #define TRACE_SDL_STARTUP_MESSAGE(text) TRACE_MESSAGE_(text)
+#define TRACE_SDL_STARTUP_PLOT(name, value) TRACE_PLOT_(name, value)
 #else
 #define TRACE_SDL_STARTUP(name) TRACE_OFF_()
 #define TRACE_SDL_STARTUP_NAMED(text) TRACE_OFF_()
@@ -123,6 +133,25 @@ struct StepScope { ~StepScope() { StepEnd(); } };
 #define TRACE_SDL_STARTUP_STEP_END() TRACE_OFF_()
 #define TRACE_SDL_STARTUP_STEPS() TRACE_OFF_()
 #define TRACE_SDL_STARTUP_MESSAGE(text) TRACE_OFF_()
+#define TRACE_SDL_STARTUP_PLOT(name, value) TRACE_OFF_()
+#endif
+
+#ifdef MELONDS_TRACE_RECORDING
+#define TRACE_RECORDING(name) TRACE_ZONE_(name)
+#define TRACE_RECORDING_NAMED(text) TRACE_NAMED_(text)
+#define TRACE_RECORDING_STEP(name) TRACE_STEP_(name)
+#define TRACE_RECORDING_STEP_END() TRACE_STEP_END_()
+#define TRACE_RECORDING_STEPS() TRACE_STEPS_()
+#define TRACE_RECORDING_MESSAGE(text) TRACE_MESSAGE_(text)
+#define TRACE_RECORDING_PLOT(name, value) TRACE_PLOT_(name, value)
+#else
+#define TRACE_RECORDING(name) TRACE_OFF_()
+#define TRACE_RECORDING_NAMED(text) TRACE_OFF_()
+#define TRACE_RECORDING_STEP(name) TRACE_OFF_()
+#define TRACE_RECORDING_STEP_END() TRACE_OFF_()
+#define TRACE_RECORDING_STEPS() TRACE_OFF_()
+#define TRACE_RECORDING_MESSAGE(text) TRACE_OFF_()
+#define TRACE_RECORDING_PLOT(name, value) TRACE_OFF_()
 #endif
 
 #endif // TRACE_H
