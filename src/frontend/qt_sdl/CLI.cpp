@@ -51,8 +51,9 @@ CommandLineOptions* ManageArgs(QApplication& melon)
     parser.addOption(QCommandLineOption({"A", "archive-file-gba"}, "Specify file to load inside an archive given (GBA)", "rom"));
 #endif
 
-    parser.addOption(QCommandLineOption({"w", "workbench"}, "Open the decomp workbench window on startup"));
-    parser.addOption(QCommandLineOption({"wo", "workbench-only"}, "Open the workbench with the game in its Game screen panel and the main window hidden"));
+    parser.addOption(QCommandLineOption({"w", "workbench"}, "Open the decomp workbench and the melonDS main window"));
+    parser.addOption(QCommandLineOption({"wo", "workbench-only"}, "The default: the workbench with the game in its Game screen panel, no main window"));
+    parser.addOption(QCommandLineOption("no-workbench", "Only the melonDS main window, no workbench"));
     parser.addOption(QCommandLineOption("api", "Enable the workbench control and query API on 127.0.0.1"));
     parser.addOption(QCommandLineOption("api-port", "Port of the API read endpoint (the control endpoint uses port+1)", "port"));
     parser.addOption(QCommandLineOption("api-memory-write", "Allow memory.write through the API"));
@@ -70,8 +71,10 @@ CommandLineOptions* ManageArgs(QApplication& melon)
     CommandLineOptions* options = new CommandLineOptions;
 
     options->fullscreen = parser.isSet("fullscreen");
-    options->workbenchOnly = parser.isSet("workbench-only");
-    options->workbench = parser.isSet("workbench") || options->workbenchOnly;
+    // the workbench alone is the default; -w adds the main window, --no-workbench is plain melonDS
+    const bool noWorkbench = parser.isSet("no-workbench");
+    options->workbenchOnly = !noWorkbench && (parser.isSet("workbench-only") || !parser.isSet("workbench"));
+    options->workbench = !noWorkbench;
     options->api = parser.isSet("api");
     options->apiPort = parser.isSet("api-port") ? parser.value("api-port").toInt() : 0;
     options->apiMemoryWrite = parser.isSet("api-memory-write");
