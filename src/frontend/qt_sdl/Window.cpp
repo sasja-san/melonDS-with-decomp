@@ -1443,6 +1443,16 @@ bool MainWindow::preloadROMsStart(QStringList file, QStringList gbafile, bool bo
     return true;
 }
 
+void MainWindow::preloadROMsFinishLater()
+{
+    if (!preload.Active) return;
+    if (!(preload.Boot && !preload.File.isEmpty())) { preloadROMsFinish(); return; }     // nothing runs in the background
+    connect(emuThread, &EmuThread::bootDone, this, [this]() { preloadROMsFinish(); },
+            Qt::ConnectionType(Qt::QueuedConnection | Qt::SingleShotConnection));
+    // done before the connection was made: its signal is gone (preloadROMsFinish runs once either way)
+    if (emuThread->bootHandled) QTimer::singleShot(0, this, [this]() { preloadROMsFinish(); });
+}
+
 bool MainWindow::preloadROMsFinish()
 {
     if (!preload.Active) return false;

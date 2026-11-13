@@ -98,6 +98,8 @@ public:
     // caller can build other things meanwhile; finish waits and reports. A true start needs its finish
     bool preloadROMsStart(QStringList file, QStringList gbafile, bool boot);
     bool preloadROMsFinish();
+    // preloadROMsFinish once the boot is done, from the event loop: the caller doesn't wait for it
+    void preloadROMsFinishLater();
     void onWorkbenchBooted();
     QStringList splitArchivePath(const QString& filename, bool useMemberSyntax);
 

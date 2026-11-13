@@ -507,8 +507,8 @@ int main(int argc, char** argv)
         TRACE_QT_STEP("startup: workbench window");
         if (options->workbench) emuInstances[0]->getWorkbench()->ShowWindow();
 
-        TRACE_QT_STEP("startup: ROM preload finish");
-        if (preloading) win->preloadROMsFinish();
+        // the rest (recent files, cart menus, an error box) when the boot is done: not waited for here
+        if (preloading) win->preloadROMsFinishLater();
 
         if (options->fullscreen)
             win->toggleFullscreen();

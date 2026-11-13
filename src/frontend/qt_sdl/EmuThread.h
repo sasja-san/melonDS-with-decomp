@@ -116,6 +116,7 @@ public:
     int bootROM(const QStringList& filename, QString& errorstr);
     // bootROM in two halves, so the GUI can do other work while the emulation thread loads the ROM:
     // start sends the boot, finish waits for it and starts the emulation. Every start needs its finish
+    std::atomic<bool> bootHandled{false};   // set with bootDone, cleared by bootROMStart
     void startRunning();  // emulator thread only: what msg_EmuRun does
     void bootROMStart(const QStringList& filename);
     int bootROMFinish(QString& errorstr);
@@ -155,6 +156,7 @@ signals:
     void windowTitleChange(QString title);
 
     void windowEmuStart();
+    void bootDone();            // a msg_BootROM is handled (worked or not): bootROMFinish won't wait
     void windowEmuStop();
     void windowEmuPause(bool pause);
     void windowEmuReset();

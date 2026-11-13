@@ -632,6 +632,8 @@ void EmuThread::handleMessages()
             if (!emuInstance->loadROM(msg.param.value<QStringList>(), true, bootError))
             {
                 msgError = bootError;
+                bootHandled = true;
+                emit bootDone();
                 break;
             }
 
@@ -640,6 +642,8 @@ void EmuThread::handleMessages()
             // run straight away: frames start while the GUI is still busy (building the workbench at startup)
             startRunning();
             msgResult = bootResult = 1;
+            bootHandled = true;
+            emit bootDone();
             break;
         }
 
@@ -908,6 +912,7 @@ void EmuThread::startRunning()
 
 void EmuThread::bootROMStart(const QStringList& filename)
 {
+    bootHandled = false;
     sendMessage({.type = msg_BootROM, .param = filename});
 }
 
