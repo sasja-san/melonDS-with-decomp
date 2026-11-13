@@ -39,6 +39,9 @@ public:
     // each parameter's label, slider and value, to grey out the ones that don't apply
     std::vector<std::array<QWidget*, 3>> rows;
     void setParamEnabled(int i, bool on) { if (i >= 0 && i < (int)rows.size()) for (QWidget* w : rows[i]) if (w) w->setEnabled(on); }
+    // moves parameter i's slider to v (clamped to its range), which applies it as a drag would
+    void setParamValue(int i, double v);
+    const struct GridParamDef* defs = nullptr;    // the parameters the rows show
 
 protected:
     void closeEvent(QCloseEvent* event) override

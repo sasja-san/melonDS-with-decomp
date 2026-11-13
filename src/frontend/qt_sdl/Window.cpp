@@ -718,7 +718,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
             lcd.filterName = "LCD filter";
             lcd.params = kGridParams;
             lcd.count = kNumGridParams;
-            lcd.setParam = [this](int i, float v) { if (panel) panel->gridParam[i] = v; };
+            lcd.setParam = [this](int i, float v) { if (panel) { panel->gridParam[i] = v; panel->refreshFilter(); } };
             lcd.setActive = [this](bool on) { onChangeScreenFilter(on ? screenFilter_LCD : screenFilter_Off); };
             lcd.presetFile = localPath("lcd-presets.json");
             lcd.legacyPresetFile = localPath("pixelgrid-presets.json");   // before the CRT filter
@@ -745,7 +745,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                     connect(box, &QSpinBox::valueChanged, this, [this, axis, rkey](int v)
                     {
                         windowCfg.SetInt(rkey, v);
-                        if (panel) panel->blurReach[axis] = v;
+                        if (panel) { panel->blurReach[axis] = v; panel->refreshFilter(); }
                     });
                     grid->addWidget(box, paramRow + i, 3);
                     reach[axis] = box;
@@ -774,7 +774,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 connect(layoutGroup, &QButtonGroup::idClicked, this, [this](int id)
                 {
                     windowCfg.SetInt("SubpixelLayout", id);
-                    if (panel) panel->subpixelLayout = id;
+                    if (panel) { panel->subpixelLayout = id; panel->refreshFilter(); }
                 });
                 grid->addLayout(layoutRow, row++, 0, 1, 4);
 
@@ -821,7 +821,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
             crt.filterName = "CRT filter";
             crt.params = kCrtParams;
             crt.count = kNumCrtParams;
-            crt.setParam = [this](int i, float v) { if (panel) panel->crtParam[i] = v; };
+            crt.setParam = [this](int i, float v) { if (panel) { panel->crtParam[i] = v; panel->refreshFilter(); } };
             crt.setActive = [this](bool on) { onChangeScreenFilter(on ? screenFilter_CRT : screenFilter_Off); };
             crt.presetFile = localPath("crt-presets.json");
             crt.note = "Made for whole-number zooms (View > Screen sizing > Force integer scaling): "
@@ -922,19 +922,19 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 connect(dec, &QComboBox::currentIndexChanged, this, [this](int i)
                 {
                     windowCfg.SetInt("CrtDecoder", i);
-                    if (panel) panel->crtDecoder = i;
+                    if (panel) { panel->crtDecoder = i; panel->refreshFilter(); }
                 });
                 connect(con, &QComboBox::currentIndexChanged, this, [this, con, updateSignalRows](int i)
                 {
                     const int v = con->itemData(i).toInt();
                     windowCfg.SetInt("CrtSignal", v);
-                    if (panel) panel->crtSignal = v;
+                    if (panel) { panel->crtSignal = v; panel->refreshFilter(); }
                     updateSignalRows();
                 });
                 connect(cab, &QComboBox::currentIndexChanged, this, [this, updateSignalRows](int i)
                 {
                     windowCfg.SetInt("CrtCable", i);
-                    if (panel) panel->crtCable = i;
+                    if (panel) { panel->crtCable = i; panel->refreshFilter(); }
                     updateSignalRows();
                 });
                 // placed with the box's sliders afterwards, in the order of what depends on what
@@ -987,6 +987,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                                            {"CrtMask", 0.7}, {"CrtGlow", 0.05}, {"CrtVignette", 0.05}, {"CrtBoost", 1.35}})},
             };
             crtWindow = buildFilterWindow(this, windowCfg, crt);
+            crtConsoleBox = sigUi->console; crtCableBox = sigUi->cable; crtDecoderBox = sigUi->decoder;
 
             // the "Video signal" box in the order of what depends on what: each choice, then (indented,
             // under a heading saying when they apply) the settings it opens up
@@ -2697,9 +2698,56 @@ void MainWindow::onChangeScreenFilter(int mode)
     for (int i = 0; i < kMaxWindows; i++)
         if (auto* w = emuInstance->getWindow(i))
         {
-            if (w->panel) w->panel->setScreenFilter(mode);
+            if (w->panel) { w->panel->setScreenFilter(mode); w->panel->refreshFilter(); }
             w->updateScreenFilterMenu();
         }
+}
+
+QJsonObject MainWindow::filterSettings()
+{
+    static const char* const modes[screenFilter_MAX] = {"off", "lcd", "crt"};
+    QJsonObject o;
+    o["mode"] = modes[screenFilterSetting(emuInstance->getLocalConfig())];
+    for (const char* k : {"CrtSignal", "CrtCable", "CrtDecoder"}) o[k] = windowCfg.GetInt(k);
+    for (int i = 0; i < kNumGridParams; i++) o[kGridParams[i].key] = windowCfg.GetDouble(kGridParams[i].key);
+    for (int i = 0; i < kNumCrtParams; i++) o[kCrtParams[i].key] = windowCfg.GetDouble(kCrtParams[i].key);
+    return o;
+}
+
+QString MainWindow::setFilterSettings(const QJsonObject& o)
+{
+    // shortcut: the LCD window's extras (blur reach, subpixel layout) aren't settable here; add them
+    // when a test needs them
+    if (!crtWindow || !lcdWindow || !crtConsoleBox) return "this window has no filter settings";
+    auto findParam = [](const GridParamDef* defs, int n, const QString& key)
+    {
+        for (int i = 0; i < n; i++) if (key == defs[i].key) return i;
+        return -1;
+    };
+    // check everything first, so a bad request changes nothing
+    for (auto it = o.begin(); it != o.end(); ++it)
+    {
+        const QString k = it.key();
+        if (k == "mode") { if (!QStringList{"off", "lcd", "crt"}.contains(it.value().toString())) return "mode is off, lcd or crt"; continue; }
+        if (!it.value().isDouble()) return k + " needs a number";
+        const int v = it.value().toInt();
+        if (k == "CrtSignal") { if (crtConsoleBox->findData(v) < 0) return "CrtSignal is 4 (Off), 0 (Blur), 1, 2 or 3"; continue; }
+        if (k == "CrtCable") { if (v < 0 || v >= crtCableBox->count()) return "CrtCable is 0 to " + QString::number(crtCableBox->count() - 1); continue; }
+        if (k == "CrtDecoder") { if (v < 0 || v >= crtDecoderBox->count()) return "CrtDecoder is 0 to " + QString::number(crtDecoderBox->count() - 1); continue; }
+        if (findParam(kCrtParams, kNumCrtParams, k) < 0 && findParam(kGridParams, kNumGridParams, k) < 0) return "unknown setting: " + k;
+    }
+    for (auto it = o.begin(); it != o.end(); ++it)
+    {
+        const QString k = it.key();
+        const double v = it.value().toDouble();
+        if (k == "mode") onChangeScreenFilter(QStringList{"off", "lcd", "crt"}.indexOf(it.value().toString()));
+        else if (k == "CrtSignal") crtConsoleBox->setCurrentIndex(crtConsoleBox->findData((int)v));
+        else if (k == "CrtCable") crtCableBox->setCurrentIndex((int)v);
+        else if (k == "CrtDecoder") crtDecoderBox->setCurrentIndex((int)v);
+        else if (int i = findParam(kCrtParams, kNumCrtParams, k); i >= 0) crtWindow->setParamValue(i, v);
+        else lcdWindow->setParamValue(findParam(kGridParams, kNumGridParams, k), v);
+    }
+    return QString();
 }
 
 void MainWindow::onToggleScreenFilter()

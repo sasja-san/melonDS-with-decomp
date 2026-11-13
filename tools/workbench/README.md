@@ -98,6 +98,7 @@ menu bar's commands, with the same names and keys.
 | `src/frontend/qt_sdl/workbench/` | Host glue (`WBHost`), API server, knowledge store, the workbench window, panels, dialogs, unit tests |
 | `src/frontend/qt_sdl/workbench/kb/*.sql` | Knowledge store migrations, applied in order |
 | `tools/workbench/python/dswb/` | Python client (typed, generated from the schema), session reader, CLI |
+| `tools/workbench/filter_shots.py` | Screenshots of the Game screen under different screen filter settings (`filter.set`, then `ui.capture`), for comparing filters |
 | `tools/workbench/testrom/` | Test ROM with known code, data, Thumb regions and data flows, on the ARM9 and its own ARM7 core (`arm7/`) |
 | `tools/workbench/tests/` | Integration tests and benchmarks |
 

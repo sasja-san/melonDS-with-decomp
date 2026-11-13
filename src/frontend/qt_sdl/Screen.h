@@ -141,6 +141,8 @@ public:
     void osdAddMessage(unsigned int color, const char* msg);
 
     virtual void drawScreen() {}// = 0;
+    // a filter setting changed: show it now, also while the game is paused (no new frames)
+    virtual void refreshFilter() { update(); }
 
 private slots:
     void onScreenLayoutChanged();
@@ -253,6 +255,7 @@ protected:
 
 private:
     void setupScreenLayout() override;
+    void refreshFilter() override;
 
     QMutex bufferLock;
     bool hasBuffers;
@@ -328,6 +331,7 @@ private:
     GLuint crtPrepassProgram = 0, crtProgram = 0;
     GLuint crtFramebuffer = 0, crtYiqTexture = 0, crtGlowTexture = 0;
     GLint crtPrepassLayerULoc = -1;
+    GLint crtPrepassPlainULoc = -1;
     GLint crtSavedBinding[3] = {0, 0, 0};   // units 1 to 3, put back after the CRT draw
     GLint crtScreenSizeULoc = -1, crtTransformULoc = -1, crtParamULoc[kNumCrtParams];
     void drawCrtPrepass(unsigned layers);

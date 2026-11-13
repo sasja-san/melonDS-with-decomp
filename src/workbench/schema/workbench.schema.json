@@ -1006,6 +1006,23 @@
           ["max_width", "u32", "scale the image down to this width; 0 keeps the native size", 1600]
         ]
       },
+      "FilterGetParams": {
+        "fields": [
+          ["window", "u32", "melonDS window: 0 is the main one (with -wo, the workbench's Game screen)", 0]
+        ]
+      },
+      "FilterSetParams": {
+        "fields": [
+          ["window", "u32", "melonDS window: 0 is the main one (with -wo, the workbench's Game screen)", 0],
+          ["settings", "json?", "an object with any of filter.get's settings to change"]
+        ]
+      },
+      "FilterState": {
+        "fields": [
+          ["window", "u32", ""],
+          ["settings", "json?", "mode (off, lcd or crt; for every window of the instance), CrtSignal (4 Off, 0 Blur, 1 Mega Drive H40, 2 Mega Drive H32, 3 SNES), CrtCable (0 RGB, 1 S-Video, 2 Composite, 3 RF), CrtDecoder (0 Standard, 1 Sony US, 2 Sony Japan), and each LCD and CRT setting by its config name (CrtBeamMin, GridDarkness...) with its value"]
+        ]
+      },
       "UiCaptureResult": {
         "fields": [
           ["png", "string", "PNG, base64"],
@@ -1090,7 +1107,9 @@
       ["kb.list", "read", "KbListParams", "KbListResult", "Functions, labels, data objects, types, annotations, bookmarks, decode overrides or modules, filtered and paged as the window's lists are."],
       ["kb.function.get", "read", "KbFunctionGetParams", "KbFunctionDetail", "One function with its source file, Compare attempts, decompiler output and annotations, as the Source and Decompiler panels show it."],
       ["ui.show", "control", "UiShowParams", "UiShowResult", "Point the workbench window at an address, a selection, a panel or a CPU, and bring it forward. Say what to show: at least one of cpu, addr, sel_addr, sel_size, panel, note."],
-      ["ui.capture", "control", "UiCaptureParams", "UiCaptureResult", "PNG of the workbench window, or of one panel. Does not raise the window. The game's own picture is screen.capture."]
+      ["ui.capture", "control", "UiCaptureParams", "UiCaptureResult", "PNG of the workbench window, or of one panel. Does not raise the window. The game's own picture is screen.capture."],
+      ["filter.get", "read", "FilterGetParams", "FilterState", "A window's screen filter settings: the filter (mode), the CRT video signal choices and every LCD and CRT setting."],
+      ["filter.set", "control", "FilterSetParams", "FilterState", "Change screen filter settings as the View menu and the filter settings windows would (their controls move along); returns them all. For tests: change, then ui.capture."]
     ],
     "events": [
       ["breakpoint_hit", "EventBreakpointHit"],

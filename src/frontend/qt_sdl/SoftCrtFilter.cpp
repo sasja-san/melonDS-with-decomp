@@ -90,6 +90,9 @@ void SoftCrtFilter::makeTables(int n, const SoftCrtParams& p)
             sl += t.tapL[i * kTaps + k] = std::exp(d * d * il);
             sc += t.tapC[i * kTaps + k] = std::exp(d * d * ic);
         }
+        // a width too small to reach any tap (Off: no blur) takes the DS pixel the phase is in, not 0/0
+        if (sl < 1e-20f) { for (int k = 0; k < kTaps; k++) t.tapL[i * kTaps + k] = k == kPad; sl = 1.f; }
+        if (sc < 1e-20f) { for (int k = 0; k < kTaps; k++) t.tapC[i * kTaps + k] = k == kPad; sc = 1.f; }
         for (int k = 0; k < kTaps; k++) { t.tapL[i * kTaps + k] /= sl; t.tapC[i * kTaps + k] /= sc; }
     }
 
@@ -169,8 +172,10 @@ void SoftCrtFilter::dsStage(Layer& L, const uint32_t* src)
             row[(x + kPad) * 3 + 1] = 0.596f * r - 0.274f * g - 0.322f * b;
             row[(x + kPad) * 3 + 2] = 0.211f * r - 0.523f * g + 0.312f * b;
         }
+        // the [1 2 1] luma prefilter, except for the console "Off" (a blur width of 0: nothing softened)
+        const bool plain = t.p.lumaBlur <= 0.f;
         for (int x = 0; x < kW; x++)
-            row[(x + kPad) * 3] = 0.25f * (yRaw[std::max(x - 1, 0)] + 2.f * yRaw[x] + yRaw[std::min(x + 1, kW - 1)]);
+            row[(x + kPad) * 3] = plain ? yRaw[x] : 0.25f * (yRaw[std::max(x - 1, 0)] + 2.f * yRaw[x] + yRaw[std::min(x + 1, kW - 1)]);
         // the shader clamps the tap position, so the padding repeats the edge pixels
         for (int x = 0; x < kPad; x++)
             for (int c = 0; c < 3; c++)

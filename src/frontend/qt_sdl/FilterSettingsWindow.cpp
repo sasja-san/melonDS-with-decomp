@@ -4,6 +4,7 @@
 
 #include "FilterSettingsWindow.h"
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -47,6 +48,13 @@ int valueToSlider(const GridParamDef& d, double v) { return qRound((v - d.min) /
 
 } // namespace
 
+void FilterWindow::setParamValue(int i, double v)
+{
+    if (!defs || i < 0 || i >= (int)rows.size()) return;
+    if (auto* s = qobject_cast<QSlider*>(rows[i][1]))
+        s->setValue(valueToSlider(defs[i], std::clamp(v, (double)defs[i].min, (double)defs[i].max)));
+}
+
 FilterWindow* buildFilterWindow(QWidget* parent, Config::Table& windowCfg, const FilterWindowSpec& spec)
 {
     auto* win = new FilterWindow(parent);
@@ -72,6 +80,7 @@ FilterWindow* buildFilterWindow(QWidget* parent, Config::Table& windowCfg, const
     const char* curSection = nullptr;
     int mainRow = paramRow, boxRow = 0;
     win->rows.assign(spec.count, {});
+    win->defs = spec.params;
     for (int i = 0; i < spec.count; i++)
     {
         if (spec.params[i].section && (!curSection || strcmp(spec.params[i].section, curSection) != 0))

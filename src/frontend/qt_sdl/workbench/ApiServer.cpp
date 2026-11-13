@@ -27,6 +27,7 @@
 #include <QTcpSocket>
 #include <QTimer>
 
+#include "../Window.h"
 #include "ApiServer.h"
 #include "WBHost.h"
 #include "WorkbenchWindow.h"
@@ -2237,6 +2238,38 @@ void ApiServer::Handle(Conn* c, const QJsonValue& id, const QString& method, con
         r.sel_size = st.SelSize;
         r.panel = st.Panel;
         r.follow_pc = st.FollowPC;
+        Reply(sock, id, r.toJson());
+        return;
+    }
+
+    if (method == "filter.get" || method == "filter.set")
+    {
+        u32 win = 0;
+        std::optional<QJsonValue> settings;
+        if (method == "filter.get")
+        {
+            WBApi::FilterGetParams p;
+            if (!WBApi::FilterGetParams::fromJson(params, p, err)) return bad(err);
+            win = p.window;
+        }
+        else
+        {
+            WBApi::FilterSetParams p;
+            if (!WBApi::FilterSetParams::fromJson(params, p, err)) return bad(err);
+            win = p.window;
+            settings = p.settings;
+            if (!settings || !settings->isObject()) return bad("settings must be an object");
+        }
+        MainWindow* mw = Host->Instance() && win < (u32)kMaxWindows ? Host->Instance()->getWindow((int)win) : nullptr;
+        if (!mw) { Error(sock, id, ErrUnavailable, QString("no melonDS window %1").arg(win)); return; }
+        if (settings)
+        {
+            QString e = mw->setFilterSettings(settings->toObject());
+            if (!e.isEmpty()) return bad(e);
+        }
+        WBApi::FilterState r;
+        r.window = win;
+        r.settings = QJsonValue(mw->filterSettings());
         Reply(sock, id, r.toJson());
         return;
     }

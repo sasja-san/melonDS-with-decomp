@@ -50,6 +50,7 @@ const int kMaxRecentROMs = 10;
 // -wo: the first main window is made but not shown; the workbench shows the game instead
 extern bool MainWindowStartHidden;
 
+class QComboBox;
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
@@ -72,6 +73,11 @@ public:
     void toggleFullscreen();
 
     bool hasOpenGL() { return hasOGL; }
+    // the screen filter settings by name (the API's filter.get/filter.set): mode, CrtSignal, CrtCable,
+    // CrtDecoder and each LCD/CRT parameter's config key. Setting goes through the View menu and the
+    // settings windows' controls, so they show the change; returns an error, or empty
+    QJsonObject filterSettings();
+    QString setFilterSettings(const QJsonObject& o);
     GL::Context* getOGLContext();
     void initOpenGL();
     void deinitOpenGL();
@@ -309,6 +315,7 @@ public:
     // screen filter settings windows (null without a menu bar)
     FilterWindow* lcdWindow = nullptr;
     FilterWindow* crtWindow = nullptr;
+    QComboBox *crtConsoleBox = nullptr, *crtCableBox = nullptr, *crtDecoderBox = nullptr;   // in crtWindow
     void saveFilterWindowState(bool closing);
     QActionGroup* grpScreenRotation;
     QAction* actScreenRotation[screenRot_MAX];

@@ -811,6 +811,16 @@ ScreenPanelNative::~ScreenPanelNative()
     filterThread.join();
 }
 
+void ScreenPanelNative::refreshFilter()
+{
+    {
+        std::lock_guard<std::mutex> l(filterLock);
+        filterPending = true;
+    }
+    filterWake.notify_one();
+    update();   // the plain picture (filter Off) needs only the repaint
+}
+
 void ScreenPanelNative::filterMain()
 {
     QImage src[2] = {QImage(256, 192, QImage::Format_RGB32), QImage(256, 192, QImage::Format_RGB32)};
@@ -1126,6 +1136,7 @@ void ScreenPanelGL::initOpenGL()
     glUseProgram(crtPrepassProgram);
     glUniform1i(glGetUniformLocation(crtPrepassProgram, "ScreenTex"), 0);
     crtPrepassLayerULoc = glGetUniformLocation(crtPrepassProgram, "uLayer");
+    crtPrepassPlainULoc = glGetUniformLocation(crtPrepassProgram, "uPlain");
 
     OpenGL::CompileVertexFragmentProgram(crtProgram,
                                          kScreenVS, kCrtFS,
@@ -1399,6 +1410,7 @@ void ScreenPanelGL::drawCrtPrepass(unsigned layers)
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, crtYiqTexture, 0, l);
         glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, crtGlowTexture, 0, l);
         glUniform1f(crtPrepassLayerULoc, (float)l);
+        glUniform1f(crtPrepassPlainULoc, crtSignal == kCrtSignalPlain ? 1.f : 0.f);   // "Off": no luma prefilter
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
     for (int b = 0; b < 2; b++) glColorMaski(b, mask[b][0], mask[b][1], mask[b][2], mask[b][3]);

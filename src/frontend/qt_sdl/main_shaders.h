@@ -245,6 +245,7 @@ const char* kCrtPrepassFS = R"(#version 140
 
 uniform sampler2DArray ScreenTex;
 uniform float uLayer;          // 0 top screen, 1 bottom
+uniform float uPlain;          // 1: console "Off", the luma without the prefilter
 
 out vec4 oYiq;                 // luma with the [1 2 1] prefilter, I, Q
 out vec4 oGlow;                // 5x5 Gaussian of linear light (sigma 1.6 DS px)
@@ -267,7 +268,8 @@ void main()
 {
     ivec2 t = ivec2(gl_FragCoord.xy);
     vec3 c = fetch(t);
-    float y = 0.25 * (dot(fetch(t - ivec2(1, 0)), kLuma) + 2.0 * dot(c, kLuma) + dot(fetch(t + ivec2(1, 0)), kLuma));
+    float y = uPlain > 0.5 ? dot(c, kLuma)
+                           : 0.25 * (dot(fetch(t - ivec2(1, 0)), kLuma) + 2.0 * dot(c, kLuma) + dot(fetch(t + ivec2(1, 0)), kLuma));
     oYiq = vec4(y,
                 dot(c, vec3(0.596, -0.274, -0.322)),
                 dot(c, vec3(0.211, -0.523, 0.312)), 1.0);
@@ -422,6 +424,9 @@ void main()
         sl += wl[k];
         sc += wc[k];
     }
+    // a width too small to reach any tap (Off: no blur) takes the DS pixel p is in (tap 4), not 0/0
+    if (sl < 1e-20) { for (int k = 0; k < 9; k++) wl[k] = k == 4 ? 1.0 : 0.0; sl = 1.0; }
+    if (sc < 1e-20) { for (int k = 0; k < 9; k++) wc[k] = k == 4 ? 1.0 : 0.0; sc = 1.0; }
 
     // the two nearest DS rows, each a beam
     float y = p.y - 0.5;

@@ -4879,6 +4879,60 @@ class UiCaptureParams:
 
 
 @dataclass
+class FilterGetParams:
+    window: int = 0  # melonDS window: 0 is the main one (with -wo, the workbench's Game screen)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FilterGetParams":
+        kw = {}
+        if "window" in d: kw["window"] = d["window"]
+        return cls(**kw)
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        out["window"] = self.window
+        return out
+
+
+@dataclass
+class FilterSetParams:
+    window: int = 0  # melonDS window: 0 is the main one (with -wo, the workbench's Game screen)
+    settings: Optional[Any] = None  # an object with any of filter.get's settings to change
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FilterSetParams":
+        kw = {}
+        if "window" in d: kw["window"] = d["window"]
+        if "settings" in d: kw["settings"] = d["settings"]
+        return cls(**kw)
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        out["window"] = self.window
+        if self.settings is not None: out["settings"] = self.settings
+        return out
+
+
+@dataclass
+class FilterState:
+    window: int = 0
+    settings: Optional[Any] = None  # mode (off, lcd or crt; for every window of the instance), CrtSignal (4 Off, 0 Blur, 1 Mega Drive H40, 2 Mega Drive H32, 3 SNES), CrtCable (0 RGB, 1 S-Video, 2 Composite, 3 RF), CrtDecoder (0 Standard, 1 Sony US, 2 Sony Japan), and each LCD and CRT setting by its config name (CrtBeamMin, GridDarkness...) with its value
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FilterState":
+        kw = {}
+        if "window" in d: kw["window"] = d["window"]
+        if "settings" in d: kw["settings"] = d["settings"]
+        return cls(**kw)
+
+    def to_dict(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        out["window"] = self.window
+        if self.settings is not None: out["settings"] = self.settings
+        return out
+
+
+@dataclass
 class UiCaptureResult:
     png: str = ""  # PNG, base64
     width: int = 0
@@ -5038,6 +5092,8 @@ METHODS = {
     "kb.function.get": ("read", KbFunctionGetParams, KbFunctionDetail),
     "ui.show": ("control", UiShowParams, UiShowResult),
     "ui.capture": ("control", UiCaptureParams, UiCaptureResult),
+    "filter.get": ("read", FilterGetParams, FilterState),
+    "filter.set": ("control", FilterSetParams, FilterState),
 }
 
 EVENTS = {"breakpoint_hit": EventBreakpointHit, "paused": EventState, "resumed": EventState, "recording_changed": EventRecording, "frames_done": EventState, "input_done": EventState}
@@ -5653,4 +5709,17 @@ class GeneratedMethods:
         if panel is not None: p.panel = panel
         if max_width is not None: p.max_width = max_width
         return UiCaptureResult.from_dict(self._call("ui.capture", p.to_dict()))
+
+    def filter_get(self, window: Optional[int] = 0) -> FilterState:
+        "A window's screen filter settings: the filter (mode), the CRT video signal choices and every LCD and CRT setting. (endpoint: read)"
+        p = FilterGetParams()
+        if window is not None: p.window = window
+        return FilterState.from_dict(self._call("filter.get", p.to_dict()))
+
+    def filter_set(self, window: Optional[int] = 0, settings: Optional[Any] = None) -> FilterState:
+        "Change screen filter settings as the View menu and the filter settings windows would (their controls move along); returns them all. For tests: change, then ui.capture. (endpoint: control)"
+        p = FilterSetParams()
+        if window is not None: p.window = window
+        if settings is not None: p.settings = settings
+        return FilterState.from_dict(self._call("filter.set", p.to_dict()))
 
