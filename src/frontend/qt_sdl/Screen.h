@@ -114,6 +114,9 @@ static const GridParamDef kCrtParams[] =
     {"Ghost delay",         "CrtGhostDelay", nullptr,          0.2f,  4.0f,  1.0f,  "us", "How late the ghost arrives, in microseconds: about 2.4 DS pixels each at the\nMega Drive's 320-wide timing. Only with the RF cable and a ghost.", false, "Video signal"},
 };
 static constexpr int kNumCrtParams = sizeof(kCrtParams) / sizeof(kCrtParams[0]);
+// CrtSignal for the settings window's "Off": no signal chain and no blur. Ntsc::Console_Off (0) is
+// "Blur" (no signal, Picture blur and Colour bleed apply); stored values keep their meaning
+constexpr int kCrtSignalPlain = Ntsc::Console_Count;
 
 
 class ScreenPanel : public QWidget

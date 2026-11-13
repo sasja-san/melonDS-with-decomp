@@ -158,7 +158,7 @@ void ScreenPanel::setScreenFilter(int mode)
 Ntsc::Settings ScreenPanel::signalSettings() const
 {
     Ntsc::Settings s;
-    s.console = std::clamp((int)crtSignal, 0, (int)Ntsc::Console_Count - 1);
+    s.console = crtSignal == kCrtSignalPlain ? (int)Ntsc::Console_Off : std::clamp((int)crtSignal, 0, (int)Ntsc::Console_Count - 1);
     s.cable = std::clamp((int)crtCable, 0, (int)Ntsc::Cable_Count - 1);
     s.decoder = std::clamp((int)crtDecoder, 0, (int)Ntsc::Decoder_Count - 1);
     s.colour = crtParam[crt_Colour]; s.tint = crtParam[crt_Tint]; s.sharpness = crtParam[crt_Sharpness];
@@ -871,7 +871,10 @@ void ScreenPanelNative::filterMain()
         {
             if (!crtFilter) crtFilter = std::make_unique<SoftCrtFilter>(threads);
             SoftCrtParams p;
-            p.curvature = crtParam[crt_Curvature]; p.lumaBlur = crtParam[crt_LumaBlur]; p.chromaBlur = crtParam[crt_ChromaBlur];
+            p.curvature = crtParam[crt_Curvature];
+            // "Off": no blur (the filters clamp a width of 0 to a sharp sample)
+            p.lumaBlur = crtSignal == kCrtSignalPlain ? 0.f : crtParam[crt_LumaBlur].load();
+            p.chromaBlur = crtSignal == kCrtSignalPlain ? 0.f : crtParam[crt_ChromaBlur].load();
             p.beamMin = crtParam[crt_BeamMin]; p.beamMax = crtParam[crt_BeamMax];
             p.mask = crtParam[crt_Mask]; p.maskPx = crtParam[crt_MaskPx];
             p.glow = crtParam[crt_Glow]; p.vignette = crtParam[crt_Vignette]; p.boost = crtParam[crt_Boost];
@@ -1582,7 +1585,10 @@ void ScreenPanelGL::drawScreen()
             glUseProgram(crtProgram);
             glUniform2f(crtScreenSizeULoc, w / factor, h / factor);
             for (int i = 0; i < kNumCrtParams; i++)
-                glUniform1f(crtParamULoc[i], crtParam[i]);
+            {
+                const bool blur = i == crt_LumaBlur || i == crt_ChromaBlur;
+                glUniform1f(crtParamULoc[i], blur && crtSignal == kCrtSignalPlain ? 0.f : crtParam[i].load());   // "Off": no blur
+            }
             glUniform1i(crtSignalULoc, chain ? 1 : 0);
             if (chain)
             {

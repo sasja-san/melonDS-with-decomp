@@ -830,19 +830,33 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
 
             // video signal: which console's encoder and which cable feed the TV. The combo boxes
             // go at the top of the "Video signal" box; the sliders that don't apply grey out
-            struct SignalUi { QComboBox* console = nullptr; QComboBox* cable = nullptr; QComboBox* decoder = nullptr; };
+            struct SignalUi
+            {
+                QComboBox* console = nullptr; QComboBox* cable = nullptr; QComboBox* decoder = nullptr;
+                QLabel *conLabel = nullptr, *cabLabel = nullptr, *decLabel = nullptr;
+                QGroupBox* box = nullptr; QGridLayout* grid = nullptr;
+                QLabel *headBlur = nullptr, *headConsole = nullptr, *headEncoded = nullptr, *headRF = nullptr;
+            };
             auto sigUi = std::make_shared<SignalUi>();
             auto updateSignalRows = [this, sigUi]()
             {
                 if (!crtWindow || !sigUi->console) return;
-                const int con = sigUi->console->currentIndex(), cab = sigUi->cable->currentIndex();
-                const bool chain = con != Ntsc::Console_Off;
+                const int con = sigUi->console->currentData().toInt(), cab = sigUi->cable->currentIndex();
+                const bool blur = con == Ntsc::Console_Off;
+                const bool chain = con != Ntsc::Console_Off && con != kCrtSignalPlain;
                 const bool encoded = chain && cab != Ntsc::Cable_RGB;
                 const bool rf = encoded && cab == Ntsc::Cable_RF;
+                sigUi->cabLabel->setEnabled(chain);
                 sigUi->cable->setEnabled(chain);
+                sigUi->decLabel->setEnabled(encoded);
                 sigUi->decoder->setEnabled(encoded);
-                crtWindow->setParamEnabled(crt_LumaBlur, !chain);
-                crtWindow->setParamEnabled(crt_ChromaBlur, !chain);
+                if (sigUi->headBlur)
+                {
+                    sigUi->headBlur->setEnabled(blur); sigUi->headConsole->setEnabled(chain);
+                    sigUi->headEncoded->setEnabled(encoded); sigUi->headRF->setEnabled(rf);
+                }
+                crtWindow->setParamEnabled(crt_LumaBlur, blur);
+                crtWindow->setParamEnabled(crt_ChromaBlur, blur);
                 for (int p : {crt_Colour, crt_Tint, crt_Sharpness}) crtWindow->setParamEnabled(p, encoded);
                 for (int p : {crt_Noise, crt_Ghost, crt_GhostDelay}) crtWindow->setParamEnabled(p, rf);
             };
@@ -851,7 +865,12 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 if (strcmp(section, "Video signal") != 0) return;
                 auto* conLabel = new QLabel("Console", box);
                 auto* con = new QComboBox(box);
-                con->addItems({"Off (simple blur)", "Mega Drive, 320 wide (H40)", "Mega Drive, 256 wide (H32)", "SNES"});
+                // the stored value (CrtSignal) is each item's data: the list order isn't the values' order
+                con->addItem("Off", kCrtSignalPlain);
+                con->addItem("Blur", (int)Ntsc::Console_Off);
+                con->addItem("Mega Drive, 320 wide (H40)", (int)Ntsc::Console_MDH40);
+                con->addItem("Mega Drive, 256 wide (H32)", (int)Ntsc::Console_MDH32);
+                con->addItem("SNES", (int)Ntsc::Console_SNES);
                 const QString conTip =
                     "Which console's video encoder sends the picture to the TV, at that console's timing.\n\n"
                     "The DS picture is put through the signal the way that console makes it: each pixel\n"
@@ -862,8 +881,9 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                     "1-pixel dithering sits on the colour carrier: it blends, with still rainbows.\n"
                     "Mega Drive, 256 wide and SNES: 1.5 pixels per colour cycle. The SNES shifts the\n"
                     "carrier a third of a cycle each line, so its artifacts run diagonally.\n\n"
-                    "Off: no signal; Picture blur and Colour bleed set a simple sideways blur.\n\n"
-                    "Default: Off";
+                    "Off: no signal and no blur: the DS pixels go straight to the tube.\n"
+                    "Blur: no signal; Picture blur and Colour bleed set a simple sideways blur.\n\n"
+                    "Default: Blur";
                 conLabel->setToolTip(conTip); con->setToolTip(conTip);
                 auto* cabLabel = new QLabel("Cable", box);
                 auto* cab = new QComboBox(box);
@@ -881,7 +901,7 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 cabLabel->setToolTip(cabTip); cab->setToolTip(cabTip);
                 {
                     QSignalBlocker b1(con), b2(cab);
-                    con->setCurrentIndex(std::clamp(windowCfg.GetInt("CrtSignal"), 0, Ntsc::Console_Count - 1));
+                    con->setCurrentIndex(std::max(0, con->findData(windowCfg.GetInt("CrtSignal"))));
                     cab->setCurrentIndex(std::clamp(windowCfg.GetInt("CrtCable"), 0, Ntsc::Cable_Count - 1));
                 }
                 auto* decLabel = new QLabel("TV decoder", box);
@@ -904,10 +924,11 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                     windowCfg.SetInt("CrtDecoder", i);
                     if (panel) panel->crtDecoder = i;
                 });
-                connect(con, &QComboBox::currentIndexChanged, this, [this, updateSignalRows](int i)
+                connect(con, &QComboBox::currentIndexChanged, this, [this, con, updateSignalRows](int i)
                 {
-                    windowCfg.SetInt("CrtSignal", i);
-                    if (panel) panel->crtSignal = i;
+                    const int v = con->itemData(i).toInt();
+                    windowCfg.SetInt("CrtSignal", v);
+                    if (panel) panel->crtSignal = v;
                     updateSignalRows();
                 });
                 connect(cab, &QComboBox::currentIndexChanged, this, [this, updateSignalRows](int i)
@@ -916,15 +937,11 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                     if (panel) panel->crtCable = i;
                     updateSignalRows();
                 });
-                grid->addWidget(conLabel, row, 0);
-                grid->addWidget(con, row++, 1, 1, 2);
-                grid->addWidget(cabLabel, row, 0);
-                grid->addWidget(cab, row++, 1, 1, 2);
-                grid->addWidget(decLabel, row, 0);
-                grid->addWidget(dec, row++, 1, 1, 2);
-                sigUi->console = con;
-                sigUi->cable = cab;
-                sigUi->decoder = dec;
+                // placed with the box's sliders afterwards, in the order of what depends on what
+                (void)row;
+                sigUi->console = con; sigUi->cable = cab; sigUi->decoder = dec;
+                sigUi->conLabel = conLabel; sigUi->cabLabel = cabLabel; sigUi->decLabel = decLabel;
+                sigUi->box = box; sigUi->grid = grid;
             };
             crt.addExtras = [sigUi](QWidget*, QGridLayout*, int, int&)
             {
@@ -932,14 +949,14 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 ex.toJson = [sigUi]()
                 {
                     QJsonObject o;
-                    o["CrtSignal"] = sigUi->console->currentIndex();
+                    o["CrtSignal"] = sigUi->console->currentData().toInt();
                     o["CrtCable"] = sigUi->cable->currentIndex();
                     o["CrtDecoder"] = sigUi->decoder->currentIndex();
                     return o;
                 };
                 ex.fromJson = [sigUi](const QJsonObject& o)
                 {
-                    sigUi->console->setCurrentIndex(std::clamp(o.value("CrtSignal").toInt(0), 0, Ntsc::Console_Count - 1));
+                    sigUi->console->setCurrentIndex(std::max(0, sigUi->console->findData(o.value("CrtSignal").toInt(Ntsc::Console_Off))));
                     sigUi->cable->setCurrentIndex(std::clamp(o.value("CrtCable").toInt(Ntsc::Cable_Composite), 0, Ntsc::Cable_Count - 1));
                     sigUi->decoder->setCurrentIndex(std::clamp(o.value("CrtDecoder").toInt(Ntsc::Decoder_Standard), 0, Ntsc::Decoder_Count - 1));
                 };
@@ -955,6 +972,9 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                 return o;
             };
             crt.builtins = {
+                // clear, near-black scanlines: thin beams in bright parts too, little glow
+                {"Scanlines", preset({{"CrtSignal", Ntsc::Console_SNES}, {"CrtCable", Ntsc::Cable_SVideo}, {"CrtCurvature", 0.0},
+                                      {"CrtBeamMin", 0.10}, {"CrtBeamMax", 0.15}, {"CrtGlow", 0.05}, {"CrtBoost", 1.2}})},
                 {"Mega Drive 2 / Genesis - composite", preset({{"CrtSignal", Ntsc::Console_MDH40}, {"CrtCable", Ntsc::Cable_Composite}})},
                 {"Mega Drive 2 / Genesis - RF", preset({{"CrtSignal", Ntsc::Console_MDH40}, {"CrtCable", Ntsc::Cable_RF},
                                                         {"CrtNoise", 0.15}, {"CrtGhost", 0.08}, {"CrtGhostDelay", 1.2}})},
@@ -967,6 +987,52 @@ MainWindow::MainWindow(int id, EmuInstance* inst, QWidget* parent, bool embedded
                                            {"CrtMask", 0.7}, {"CrtGlow", 0.05}, {"CrtVignette", 0.05}, {"CrtBoost", 1.35}})},
             };
             crtWindow = buildFilterWindow(this, windowCfg, crt);
+
+            // the "Video signal" box in the order of what depends on what: each choice, then (indented,
+            // under a heading saying when they apply) the settings it opens up
+            if (sigUi->grid)
+            {
+                QGridLayout* g = sigUi->grid;
+                while (QLayoutItem* it = g->takeAt(0)) delete it;     // the widgets stay; only their places go
+                int r = 0;
+                const int step = 18;
+                auto head = [&](const char* text, int level)
+                {
+                    auto* l = new QLabel(QString("<i>%1</i>").arg(text), sigUi->box);
+                    l->setIndent(level * step);
+                    g->addWidget(l, r++, 0, 1, 3);
+                    return l;
+                };
+                auto combo = [&](QLabel* name, QComboBox* c, int level)
+                {
+                    name->setIndent(level * step);
+                    g->addWidget(name, r, 0);
+                    g->addWidget(c, r++, 1, 1, 2);
+                };
+                auto param = [&](int p, int level)
+                {
+                    auto& w = crtWindow->rows[p];
+                    if (auto* name = qobject_cast<QLabel*>(w[0])) name->setIndent(level * step);
+                    g->addWidget(w[0], r, 0);
+                    g->addWidget(w[1], r, 1);
+                    g->addWidget(w[2], r++, 2);
+                };
+                combo(sigUi->conLabel, sigUi->console, 0);
+                sigUi->headBlur = head("With Console: Blur", 1);
+                param(crt_LumaBlur, 1);
+                param(crt_ChromaBlur, 1);
+                sigUi->headConsole = head("With a console (Mega Drive, SNES)", 1);
+                combo(sigUi->cabLabel, sigUi->cable, 1);
+                sigUi->headEncoded = head("With Cable: S-Video, Composite or RF", 2);
+                combo(sigUi->decLabel, sigUi->decoder, 2);
+                param(crt_Colour, 2);
+                param(crt_Tint, 2);
+                param(crt_Sharpness, 2);
+                sigUi->headRF = head("With Cable: RF", 3);
+                param(crt_Noise, 3);
+                param(crt_Ghost, 3);
+                param(crt_GhostDelay, 3);
+            }
             updateSignalRows();
         }
 
