@@ -38,6 +38,7 @@ struct CommandLineOptions
     bool workbench = false;
     bool workbenchOnly = false;
     bool defaultLayout = false;
+    int stateSlot = 0;          // --state N: load savestate slot N after the boot (0: none)
     bool api = false;
     int apiPort = 0;
     bool apiMemoryWrite = false;

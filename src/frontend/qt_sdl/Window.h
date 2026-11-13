@@ -88,6 +88,7 @@ public:
     bool preloadROMsFinish();
     // preloadROMsFinish once the boot is done, from the event loop: the caller doesn't wait for it
     void preloadROMsFinishLater();
+    int bootStateSlot = 0;      // savestate slot preloadROMsFinish loads after the boot (--state)
     void onWorkbenchBooted();
     QStringList splitArchivePath(const QString& filename, bool useMemberSyntax);
 

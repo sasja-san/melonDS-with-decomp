@@ -1591,6 +1591,16 @@ bool MainWindow::preloadROMsFinish()
     if (gbaloaded)
         updateCartInserted(true);
 
+    if (bootStateSlot > 0 && ndsloaded)
+    {
+        // --state N: as File > Load state > slot N
+        QString state = QString::fromStdString(emuInstance->getSavestateName(bootStateSlot));
+        if (!Platform::FileExists(state.toStdString())) emuInstance->osdAddMessage(0xFFA0A0, "State slot %d is empty", bootStateSlot);
+        else if (emuThread->loadState(state)) emuInstance->osdAddMessage(0, "State loaded from slot %d", bootStateSlot);
+        else emuInstance->osdAddMessage(0xFFA0A0, "State load failed");
+        bootStateSlot = 0;
+    }
+
     return true;
 }
 

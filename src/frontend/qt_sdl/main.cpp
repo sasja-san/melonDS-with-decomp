@@ -588,6 +588,7 @@ int main(int argc, char** argv)
 
         // the ROM boots on the emulation thread while the workbench window is built here, then we wait
         // for it: the workbench settings it reads (record at boot) are set above
+        win->bootStateSlot = options->stateSlot;
         const bool preloading = win->preloadROMsStart(dsfile, gbafile, options->boot);
 
         TRACE_QT_STEP("startup: workbench window");
