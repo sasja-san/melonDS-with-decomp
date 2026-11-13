@@ -255,6 +255,8 @@ private:
     void SwitchWorkspace(int idx);
     void RebuildWorkspaceMenu();
     void FinishLayout();
+    void StartLayout();             // builds the current workspace's layout, once
+    void RestoreCurrentWorkspace();
     std::vector<Workspace> Workspaces;
     int CurWorkspace = 0;
     QMenu* WorkspaceMenu = nullptr;
@@ -305,6 +307,7 @@ private:
     ads::CDockManager* DockMgr = nullptr;
     std::vector<ads::CDockWidget*> Docks;
     QByteArray DefaultState;
+    bool LayoutStarted = false;
     bool DefaultCached = false;     // DefaultState came from the config: the default layout was never built
     QByteArray SavedState;               // the layout last written to the config
     static constexpr int LayoutVersion = 1;    // bumped when panels are added or renamed

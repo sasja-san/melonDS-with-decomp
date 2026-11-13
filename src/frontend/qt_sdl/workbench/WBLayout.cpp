@@ -403,6 +403,10 @@ void WorkbenchWindow::InitWorkspaces()
     // a layout saved before workspaces existed belongs to the default workspace
     QByteArray legacy = QByteArray::fromBase64(cfg.GetQString("Workbench.DockState").toLatin1());
     if (cur.isEmpty() && !legacy.isEmpty()) Workspaces[0].State = legacy;
+}
+
+void WorkbenchWindow::RestoreCurrentWorkspace()
+{
     Workspace& w = Workspaces[CurWorkspace];
     if (H->Settings().DefaultLayout) w.State.clear();     // --default-layout: the last-used one is replaced on save
     // an unchanged built-in: making its layout leaves the panels in it (when the default layout is showing)

@@ -377,17 +377,19 @@ void WorkbenchWindow::FinishLayout()
         cfg.SetQString("Workbench.DefaultLayout", QString::fromLatin1(DefaultState.toBase64()));
         cfg.SetQString("Workbench.DefaultLayoutKey", DefaultLayoutKey());
     }
-    // the current workspace's layout; one that can't be restored falls back to the workspace's default
     InitWorkspaces();
-    RebuildWorkspaceMenu();
-    SavedState = DockMgr->saveState(LayoutVersion);
     // the game screen mode the user chose last time
     Config::Table cfg = Config::GetGlobalTable();
     bool only = H->Settings().WorkbenchOnly;
-    if (only || cfg.GetBool("Workbench.EmbeddedScreen"))
+    if (!(only || cfg.GetBool("Workbench.EmbeddedScreen"))) StartLayout();
+    else
     {
         ActEmbed->setChecked(true);
         ActHideMain->setChecked(only || cfg.GetBool("Workbench.HideMainWindow"));
+        // the game goes on screen first, the rest of the layout (~350 ms) after it. With the default
+        // layout skipped no panel is placed yet: the game panel gets the whole window until then
+        if (DefaultCached)
+            if (ads::CDockWidget* g = DockMgr->findDockWidget("dock_game")) DockMgr->addDockWidget(ads::CenterDockWidgetArea, g);
         // not before the emulator has run a few frames: the game window's OpenGL context is made on the
         // emulation thread, which sets up its own at startup
         auto* wait = new QTimer(this);
@@ -399,9 +401,25 @@ void WorkbenchWindow::FinishLayout()
             if (!ready && QDateTime::currentMSecsSinceEpoch() - since < 10000) return;
             wait->deleteLater();
             if (ActEmbed->isChecked()) SetEmbeddedScreen(true);
+            // shortcut: a fixed 50 ms (three frames) for the first frame to be drawn; a "first frame shown"
+            // signal from the screen panel would be exact
+            QTimer::singleShot(50, this, [this]() { StartLayout(); });
         });
         wait->start(10);
     }
+}
+
+void WorkbenchWindow::StartLayout()
+{
+    TRACE_QT("WorkbenchWindow::StartLayout");
+    if (LayoutStarted) return;
+    LayoutStarted = true;
+    // the current workspace's layout; one that can't be restored falls back to the workspace's default
+    RestoreCurrentWorkspace();
+    // the saved layout may have the game panel closed
+    if (GameWin) if (ads::CDockWidget* g = DockMgr->findDockWidget("dock_game")) g->toggleView(true);
+    RebuildWorkspaceMenu();
+    SavedState = DockMgr->saveState(LayoutVersion);
     // the first time (and until it is turned off), say what the switches do
     // (shown without taking the keyboard focus)
     if (!Config::GetGlobalTable().GetBool("Workbench.GettingStartedDismissed"))
@@ -435,7 +453,7 @@ void WorkbenchWindow::closeEvent(QCloseEvent* e)
 
 void WorkbenchWindow::SaveLayout()
 {
-    if (Workspaces.empty()) return;
+    if (!LayoutStarted) return;     // closed before the saved layout was built: keep the saved one
     QByteArray state = DockMgr->saveState(LayoutVersion);
     QByteArray geom = saveGeometry();
     Config::Table cfg = Config::GetGlobalTable();
@@ -1080,7 +1098,7 @@ void WorkbenchWindow::BuildMenus()
     WorkspaceMenu = win->addMenu("Workspaces");
     add(win, "panels", "Panels...", [this]() { ShowPanelPalette(); }, {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_P)});
     win->addSeparator();
-    add(win, "reset_layout", "Reset layout", [this]() { if (!Workspaces.empty()) { RestoreLayout(EnsureDefault(Workspaces[CurWorkspace])); SaveLayout(); } });
+    add(win, "reset_layout", "Reset layout", [this]() { if (LayoutStarted) { RestoreLayout(EnsureDefault(Workspaces[CurWorkspace])); SaveLayout(); } });
 
     QMenu* help = mb->addMenu("&Help");
     add(help, "getting_started", "Getting started", [this]() { ShowPanel("dock_start"); });
