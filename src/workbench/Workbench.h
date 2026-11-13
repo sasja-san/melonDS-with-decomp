@@ -36,6 +36,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <bitset>
+#include <thread>
 #include <vector>
 
 #include "types.h"
@@ -234,7 +235,9 @@ public:
 
     // propagation, called from Workbench hooks
     // regs: the CPU's registers before the instruction (used when following table lookups)
-    void PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, const u32* regs = nullptr);
+    // ptrMask: bit r set when register r (0-14) holds a pointer-like value (PointerMask of the registers)
+    void PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, u16 ptrMask = 0);
+    static u16 PointerMask(const u32* regs, u16 which = 0x7FFF);
     void PostExec(u32 cpu);
     void OnRead(u32 cpu, u32 addr, u32 size, u32 fixedlabel, u32 value = 0);
     void OnWrite(u32 cpu, u32 addr, u32 size);
@@ -534,6 +537,14 @@ struct HistoryView
     }
 };
 
+// The CPU state right after an instruction, which the recorder's call tracking needs
+struct PostState
+{
+    u32 NPC = 0;        // next instruction's address
+    u32 CPSR = 0, R0 = 0, R1 = 0, R13 = 0, R14 = 0;
+    u32 VecBase = 0;    // the CPU's exception vector base
+};
+
 class Recorder
 {
 public:
@@ -578,13 +589,13 @@ public:
 
     // hooks
     void OnExec(u32 cpu, u32 pc, bool thumb);
-    void OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr);
-    void OnDiscontinuity(u32 cpu, ARM* arm, u32 pc);
+    void OnPostExec(u32 cpu, const PostState& st, u32 pc, bool thumb, u32 instr);
+    void OnDiscontinuity(u32 cpu, u32 pc, u32 sp, u32 vecbase);
     void OnRead(u32 cpu, u32 addr, u32 size, u32 value);
-    void OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa);
+    void OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa, u32 sp);
     void OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value);
     void OnCardCommand(const u8* cmd);
-    void OnCardData(u32 value);
+    void OnCardData(u32 cpu, u32 value);
     void OnTcmChange(u32 itcmsize, u32 dtcmbase, u32 dtcmsize);
     void OnFrameEnd();
     void OnBootLoad();
@@ -769,7 +780,7 @@ public:
     void CardCommand(const u8* cmd);
     void CardData(u32 value);
     void TcmChanged();
-    void MappingChanged() { MapGen++; }
+    void MappingChanged();
     void FrameEnd();
 
     // address helpers
@@ -807,13 +818,76 @@ public:
     std::function<bool(u32 fileId, u32 outer, u32 inner)> SubFileInside;
 
     u32 MapGen = 1;
-    u32 Cur[2] = {0, 0};          // address of the instruction being executed
+    u32 Cur[2] = {0, 0};          // address of the instruction being executed (emu thread)
     bool CurThumb[2] = {false, false};
     u32 CurInstr[2] = {0, 0};
     u32 PrevMode[2] = {0x13, 0x13};
 
+    // ---- the recorder thread
+    // The hooks only write events into a ring; the recorder thread feeds them to Rec and Taint, in order.
+    // The emulator thread runs ahead; anything that reads or changes Rec/Taint from the emulator thread
+    // first waits until the ring is empty (RecDrain): jobs, breaks, resets, ROM loads, session saves.
+    void RecDrain();
+    // A read-only job (a panel's or the API's query): run on the recorder thread between two events, so it
+    // sees Rec/Taint whole without the emulator waiting. Without a recorder thread: an emulator-thread job.
+    // It may read the emulator's memory and registers while the emulator runs (as a panel did before)
+    void PostQuery(std::function<void()> job);
+    // what Rec/Taint see: the recorder thread's instruction, frame and time, behind the emulator's. Right
+    // after RecDrain they equal the emulator's, so code on either thread that only runs then can use them
+    u32 RecPC(u32 cpu) const { return RecCur[cpu & 1]; }
+    u32 RecFrameNow() const { return RecFrame; }
+    u64 RecTimeNow() const { return RecTs; }
+
 private:
     melonDS::NDS* NDS = nullptr;
+
+    enum class RecMsg : u8 { Exec, Post, Read, Write, DMA, CardCmd, CardData, Tcm, Mapping, FrameEnd };
+    struct RecEvent
+    {
+        RecMsg Kind;
+        u8 Cpu, Flags, Size;
+        u32 A, B, C, D, E, F, G;        // what each holds: the hooks and RecDispatch in Recorder.cpp
+    };      // 32 bytes
+    static constexpr u64 RecRingSize = 1 << 18;     // 8 MB: absorbs a busy frame's bursts
+    std::unique_ptr<RecEvent[]> RecRing;
+    alignas(64) std::atomic<u64> RecHead{0};        // written by the emulator thread
+    alignas(64) std::atomic<u64> RecTail{0};        // written by the recorder thread
+    std::thread RecThread;
+    std::atomic<bool> RecStop{false};
+    std::mutex RecWakeLock;                         // only to sleep on when the ring is empty, and for RecQueries
+    std::condition_variable RecWakeCond;
+    std::vector<std::function<void()>> RecQueries;
+    std::atomic<bool> RecQueriesPending{false};
+    void RecRunQueries();
+    // the emulator thread's last PostExec, sent with that CPU's next instruction (or alone before anything else)
+    // the emulator thread's fields, on cache lines of their own: the recorder thread writes its fields
+    // (below) on every event, and a shared line would bounce between the cores (false sharing)
+    alignas(64) u64 ProdHead = 0;
+    u64 ProdTailSeen = 0;
+    bool ProdTaintOn = false;       // Taint.Enabled(), as of the frame's start (UpdateHookFlags)
+    PostState PendingPost;
+    int PendingPostCpu = -1;
+    bool PendingPostSeq = false;    // it went on to the next instruction (and was no SWI): sent as a flag
+    u32 ProdExpected[2] = {0xFFFFFFFF, 0xFFFFFFFF};     // where each CPU goes next, as far as the emulator thread knows
+    // which registers an ALU instruction reads, for data origin's pointer check (Origin::PointerMask)
+    struct SrcSlot { u32 Instr = 0; u16 Src = 0; bool Thumb = false, Valid = false; };
+    SrcSlot ProdSrc[1024];
+    // the recorder thread's view
+    alignas(64) u32 RecCur[2] = {0, 0};
+    bool RecThumb[2] = {false, false};
+    u32 RecInstr[2] = {0, 0};
+    u32 RecFrame = 0;
+    u64 RecTs = 0;
+    alignas(64) u8 RecPadEnd = 0;   // keeps the next fields off the recorder thread's line
+
+    // the emulator thread's own copies: the shared counters are touched only every 64 events (a write to
+    // RecHead pulls the cache line away from the recorder thread, which reads it all the time)
+    RecEvent& RecBegin(RecMsg kind, u32 cpu);
+    void RecPublish() { RecHead.store(ProdHead, std::memory_order_release); }
+    void RecCommit() { if ((++ProdHead & 63) == 0) RecPublish(); }
+    void RecFlushPost();
+    void RecThreadMain();
+    void RecDispatch(const RecEvent& e);
 };
 
 template <typename F> void Recorder::ForEachHistory(F&& f) const

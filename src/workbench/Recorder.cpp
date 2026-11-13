@@ -28,6 +28,21 @@
 namespace melonDS::WB
 {
 
+// true on the recorder thread (Workbench::RecThreadMain)
+thread_local bool tlRecThread = false;
+
+// a short wait in a spin loop, without a system call
+static inline void RecPause()
+{
+#if defined(__x86_64__) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    asm volatile("yield");
+#endif
+}
+
+
+
 static constexpr u32 CardDataPort = 0x04100010;
 
 Recorder::Recorder(Workbench& wb) : WB(wb)
@@ -71,17 +86,17 @@ void Recorder::Reset()
     EntryGen = IdentifiedGen = 0;
     PrologueScanned = false;
     DidIdentify = false;
-    StartFrame = EndFrame = WB.Frame();
+    StartFrame = EndFrame = WB.RecFrameNow();
     WB.MapGen++;
 }
 
 void Recorder::LogEvent(RecEventKind kind, u16 value)
 {
     RecEvent e {};
-    e.frame = WB.Frame();
+    e.frame = WB.RecFrameNow();
     e.kind = (u16)kind;
     e.value = value;
-    e.timestamp = WB.Timestamp();
+    e.timestamp = WB.RecTimeNow();
     EventLog.push_back(e);
 }
 
@@ -154,7 +169,7 @@ void Recorder::SetEnabled(bool on)
     if (on == On) return;
     if (on)
     {
-        StartFrame = WB.Frame();
+        StartFrame = WB.RecFrameNow();
         EndFrame = StartFrame;
         for (int i = 0; i < 2; i++)
         {
@@ -168,7 +183,7 @@ void Recorder::SetEnabled(bool on)
     else
     {
         FlushTransfers();
-        EndFrame = WB.Frame();
+        EndFrame = WB.RecFrameNow();
         LogEvent(RecEventKind::RecordingOff);
         On = false;
     }
@@ -218,7 +233,7 @@ void Recorder::SetHistoryCap(u64 entries)
 
 u32 Recorder::FramesRecorded() const
 {
-    u32 end = On ? WB.Frame() : EndFrame;
+    u32 end = On ? WB.RecFrameNow() : EndFrame;
     return end >= StartFrame ? end - StartFrame : 0;
 }
 
@@ -419,13 +434,13 @@ void Recorder::MarkOverlayLoaded(u32 cpu, u32 id, u8 kind)
     auto event = [&](const OverlayInfo& o, u32 ocpu, u8 okind)
     {
         OverlayEvent e {};
-        e.frame = WB.Frame();
+        e.frame = WB.RecFrameNow();
         e.cpu = (u8)ocpu;
         e.kind = okind;
         e.overlay_id = (u16)o.Id;
         e.ram_start = o.RamStart;
         e.ram_end = o.RamStart + o.RamSize + o.BssSize;
-        e.timestamp = WB.Timestamp();
+        e.timestamp = WB.RecTimeNow();
         OvlEvents.push_back(e);
     };
     for (u16 o : evicted)
@@ -512,7 +527,7 @@ void Recorder::OnExec(u32 cpu, u32 pc, bool thumb)
             ev.rom_offset = 0xFFFFFFFF;
             ev.file_id = FileNone;
             ev.aux = d.Swi;
-            ev.timestamp = WB.Timestamp();
+            ev.timestamp = WB.RecTimeNow();
             AddProvenance(ev);
 
             for (u32 a = ev.dst_addr; a < ev.dst_addr + ev.dst_size; a++)
@@ -542,14 +557,14 @@ void Recorder::OnExec(u32 cpu, u32 pc, bool thumb)
     // first frames: one test per instruction, and the bytes' only on their first run
     if (!r[0].exec_count || !r[n - 1].exec_count)
         for (u32 i = 0; i < n; i++)
-            if (!r[i].exec_count) p->First[idx + i][Block_Exec] = WB.Frame() + 1;
+            if (!r[i].exec_count) p->First[idx + i][Block_Exec] = WB.RecFrameNow() + 1;
     for (u32 i = 0; i < n; i++)
     {
         r[i].exec_count++;
         r[i].flags |= fl;
         ClassExec(r[i]);
     }
-    p->BlockFrame[idx >> BlockShift][Block_Exec] = WB.Frame();
+    p->BlockFrame[idx >> BlockShift][Block_Exec] = WB.RecFrameNow();
 }
 
 void Recorder::PushFrame(u32 cpu, const ShadowFrame& f)
@@ -569,7 +584,7 @@ void Recorder::AddEdge(u32 cpu, u32 callsite, u32 callee, u32 callerfunc, CallKi
     }
     CallEdgeKey k {callsite, callee};
     auto it = CallEdges[cpu].find(k);
-    u32 frame = WB.Frame();
+    u32 frame = WB.RecFrameNow();
     if (it == CallEdges[cpu].end())
     {
         CallEdge e {};
@@ -592,20 +607,20 @@ void Recorder::AddEdge(u32 cpu, u32 callsite, u32 callee, u32 callerfunc, CallKi
     }
 }
 
-void Recorder::OnDiscontinuity(u32 cpu, ARM* arm, u32 pc)
+void Recorder::OnDiscontinuity(u32 cpu, u32 pc, u32 sp, u32 vecbase)
 {
     // control arrived somewhere other than the next instruction without an instruction doing it:
     // an interrupt, or an external change (reset, savestate, debugger)
     u32 expected = ExpectedPC[cpu];
     ExpectedPC[cpu] = 0xFFFFFFFF;
     if (expected == 0xFFFFFFFF) return;
-    if (pc == arm->ExceptionBase + 0x18)
+    if (pc == vecbase + 0x18)
     {
         ShadowFrame f {};
         f.callee = pc;
         f.call_site = expected;
         f.return_addr = expected;
-        f.sp = arm->R[13];
+        f.sp = sp;
         f.kind = (u8)CallKind::Interrupt;
         f.thumb = 0;
         PushFrame(cpu, f);
@@ -617,11 +632,11 @@ void Recorder::OnDiscontinuity(u32 cpu, ARM* arm, u32 pc)
     }
 }
 
-void Recorder::OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr)
+void Recorder::OnPostExec(u32 cpu, const PostState& arm, u32 pc, bool thumb, u32 instr)
 {
     u32 size = thumb ? 2 : 4;
-    bool nowthumb = arm->CPSR & 0x20;
-    u32 npc = arm->R[15] - (nowthumb ? 2 : 4);
+    bool nowthumb = arm.CPSR & 0x20;
+    u32 npc = arm.NPC;
     ExpectedPC[cpu] = npc;
 
     // BIOS decompression start
@@ -635,11 +650,11 @@ void Recorder::OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr)
             d = PendingDecompress();
             d.Active = true;
             d.Swi = (u32)swi;
-            d.Src = arm->R[0];
-            d.Dst = arm->R[1];
+            d.Src = arm.R0;
+            d.Dst = arm.R1;
             d.ReturnAddr = pc + size;
             d.PC = pc;
-            d.Frame = WB.Frame();
+            d.Frame = WB.RecFrameNow();
         }
     }
 
@@ -658,9 +673,9 @@ void Recorder::OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr)
         }
     }
 
-    u32 lr = arm->R[14] & ~1u;
-    u32 vecbase = arm->ExceptionBase;
-    bool vector = (npc >= vecbase && npc < vecbase + 0x20) && ((arm->CPSR & 0x1F) != 0x10 && (arm->CPSR & 0x1F) != 0x1F);
+    u32 lr = arm.R14 & ~1u;
+    u32 vecbase = arm.VecBase;
+    bool vector = (npc >= vecbase && npc < vecbase + 0x20) && ((arm.CPSR & 0x1F) != 0x10 && (arm.CPSR & 0x1F) != 0x1F);
     if (lr == pc + size || (vector && lr == ((pc + size) & ~1u)))
     {
         u32 callsite = pc;
@@ -670,8 +685,8 @@ void Recorder::OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr)
         ShadowFrame f {};
         f.callee = npc;
         f.call_site = callsite;
-        f.return_addr = arm->R[14];
-        f.sp = arm->R[13];
+        f.return_addr = arm.R14;
+        f.sp = arm.R13;
         f.kind = (u8)kind;
         f.thumb = nowthumb ? 1 : 0;
         PushFrame(cpu, f);
@@ -771,15 +786,15 @@ void Recorder::TrackCopy(u32 cpu, u32 src, u32 dst, u32 size)
     ev = ProvenanceEvent {};
     ev.kind = (u8)ProvenanceKind::CpuCopy;
     ev.cpu = (u8)cpu;
-    ev.frame = WB.Frame();
-    ev.pc = WB.Cur[cpu];
+    ev.frame = WB.RecFrameNow();
+    ev.pc = WB.RecPC(cpu);
     ev.src_addr = src;
     ev.src_size = size;
     ev.dst_addr = dst;
     ev.dst_size = size;
     ev.rom_offset = 0xFFFFFFFF;
     ev.file_id = FileNone;
-    ev.timestamp = WB.Timestamp();
+    ev.timestamp = WB.RecTimeNow();
     t.NextSrc = src + size;
     t.NextDst = dst + size;
 }
@@ -796,10 +811,9 @@ void Recorder::OnCardCommand(const u8* cmd)
         CardActive = false;
 }
 
-void Recorder::OnCardData(u32 value)
+void Recorder::OnCardData(u32 cpu, u32 value)
 {
-    // the word that will be consumed by the CPU or DMA read currently in progress
-    u32 cpu = WB.GetNDS() ? (u32)WB.GetNDS()->CurCPU : 0;
+    // the word that will be consumed by the CPU or DMA read currently in progress (cpu: NDS::CurCPU)
     if (!CardActive)
     {
         LastCard[cpu].Valid = false;
@@ -860,15 +874,15 @@ void Recorder::HandleCardWordStored(u32 cpu, u32 dst, u32 dstsize, PhysAddr pa, 
     ev.kind = (u8)ProvenanceKind::CardRead;
     ev.cpu = (u8)(dma ? ((cpu & 1) ? (u8)Cpu::DMA7 : (u8)Cpu::DMA9) : cpu);
     ev.channel = (u8)channel;
-    ev.frame = WB.Frame();
-    ev.pc = WB.Cur[cpu & 1];
+    ev.frame = WB.RecFrameNow();
+    ev.pc = WB.RecPC(cpu & 1);
     ev.src_addr = romoff;
     ev.src_size = dstsize;
     ev.dst_addr = dst;
     ev.dst_size = dstsize;
     ev.rom_offset = romoff;
     ev.file_id = file ? file->Id : FileNone;
-    ev.timestamp = WB.Timestamp();
+    ev.timestamp = WB.RecTimeNow();
     t.NextSrc = romoff + dstsize;
     t.NextDst = dst + dstsize;
 }
@@ -911,16 +925,16 @@ void Recorder::OnRead(u32 cpu, u32 addr, u32 size, u32 value)
     if (LiteralLoad[cpu]) fl |= ByteFlag::LiteralPool;
     if (!r[0].read_count || !r[size - 1].read_count)
         for (u32 i = 0; i < size; i++)
-            if (!r[i].read_count) p->First[idx + i][Block_Read] = WB.Frame() + 1;
+            if (!r[i].read_count) p->First[idx + i][Block_Read] = WB.RecFrameNow() + 1;
     for (u32 i = 0; i < size; i++)
     {
         r[i].read_count++;
         r[i].flags |= fl;
         ClassData(r[i]);
     }
-    p->BlockFrame[idx >> BlockShift][Block_Read] = WB.Frame();
+    p->BlockFrame[idx >> BlockShift][Block_Read] = WB.RecFrameNow();
     u32* rd = p->Readers[idx >> 2];
-    u32 pc = WB.Cur[cpu] | cpu;   // bit 0 marks ARM7 (instruction addresses are even)
+    u32 pc = WB.RecPC(cpu) | cpu;   // bit 0 marks ARM7 (instruction addresses are even)
     if (rd[0] != pc)
     {
         rd[1] = rd[0];
@@ -928,7 +942,7 @@ void Recorder::OnRead(u32 cpu, u32 addr, u32 size, u32 value)
     }
 }
 
-void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa)
+void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, PhysAddr pa, u32 sp)
 {
 #ifdef MELONDS_TRACE_RECORDING
     TraceWrite++;
@@ -962,12 +976,12 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
         }
     }
 
-    if (HistoryOn && pa.Recordable() && HistoryWanted(cpu & 1, addr, size, WB.Cur[cpu], WB.GetNDS() ? (cpu ? WB.GetNDS()->ARM7.R[13] : WB.GetNDS()->ARM9.R[13]) : 0, value == oldvalue))
+    if (HistoryOn && pa.Recordable() && HistoryWanted(cpu & 1, addr, size, WB.RecPC(cpu), sp, value == oldvalue))
     {
         WriteHistoryEntry e;
-        e.timestamp = WB.Timestamp();
-        e.frame = WB.Frame();
-        e.pc = WB.Cur[cpu];
+        e.timestamp = WB.RecTimeNow();
+        e.frame = WB.RecFrameNow();
+        e.pc = WB.RecPC(cpu);
         e.addr = addr;
         e.old_value = oldvalue;
         e.new_value = value;
@@ -986,8 +1000,8 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
     ByteRecord* r = &p->Rec[idx];
     if (InOverlaySpan(0, addr) || InOverlaySpan(1, addr)) NoteOverlayWrite(addr, r[0].flags);
     u16 fl = cpu ? ByteFlag::Write7 : ByteFlag::Write9;
-    u32 frame = WB.Frame();
-    u32 pc = WB.Cur[cpu];
+    u32 frame = WB.RecFrameNow();
+    u32 pc = WB.RecPC(cpu);
     if (!r[0].write_count || !r[size - 1].write_count)
         for (u32 i = 0; i < size; i++)
             if (!r[i].write_count) p->First[idx + i][Block_Write] = frame + 1;
@@ -1005,7 +1019,6 @@ void Recorder::OnWrite(u32 cpu, u32 addr, u32 size, u32 value, u32 oldvalue, Phy
 
 void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value)
 {
-    TRACE_RECORDING("recording: DMA");
 #ifdef MELONDS_TRACE_RECORDING
     TraceDMA++;
 #endif
@@ -1027,7 +1040,7 @@ void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value
     if (!On) return;
 
     PhysAddr spa = WB.Translate(dcpu, src);
-    u32 frame = WB.Frame();
+    u32 frame = WB.RecFrameNow();
 
     if (spa.Recordable())
     {
@@ -1054,7 +1067,7 @@ void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value
         if (HistoryOn && HistoryWanted(cpu ? 3 : 2, dst, size, src, 0, old == value))
         {
             WriteHistoryEntry e;
-            e.timestamp = WB.Timestamp();
+            e.timestamp = WB.RecTimeNow();
             e.frame = frame;
             e.pc = src;
             e.addr = dst;
@@ -1120,14 +1133,14 @@ void Recorder::OnDMA(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value
     ev.cpu = (u8)(cpu ? Cpu::DMA7 : Cpu::DMA9);
     ev.channel = (u8)channel;
     ev.frame = frame;
-    ev.pc = WB.Cur[cpu];
+    ev.pc = WB.RecPC(cpu);
     ev.src_addr = src;
     ev.src_size = size;
     ev.dst_addr = dst;
     ev.dst_size = size;
     ev.rom_offset = 0xFFFFFFFF;
     ev.file_id = FileNone;
-    ev.timestamp = WB.Timestamp();
+    ev.timestamp = WB.RecTimeNow();
     t.NextSrc = src + size;
     t.NextDst = dst + size;
 }
@@ -1141,11 +1154,11 @@ void Recorder::OnTcmChange(u32 itcmsize, u32 dtcmbase, u32 dtcmsize)
         if (l.itcm_size == itcmsize && l.dtcm_base == dtcmbase && l.dtcm_size == dtcmsize) return;
     }
     TcmEvent e {};
-    e.frame = WB.Frame();
+    e.frame = WB.RecFrameNow();
     e.itcm_size = itcmsize;
     e.dtcm_base = dtcmbase;
     e.dtcm_size = dtcmsize;
-    e.timestamp = WB.Timestamp();
+    e.timestamp = WB.RecTimeNow();
     TcmList.push_back(e);
 }
 
@@ -1160,14 +1173,14 @@ void Recorder::OnBootLoad()
         ev.kind = (u8)ProvenanceKind::BootLoad;
         ev.cpu = (u8)Cpu::Boot;
         ev.channel = (u8)cpu;
-        ev.frame = WB.Frame();
+        ev.frame = WB.RecFrameNow();
         ev.src_addr = romoff;
         ev.src_size = size;
         ev.dst_addr = ram;
         ev.dst_size = size;
         ev.rom_offset = romoff;
         ev.file_id = fileid;
-        ev.timestamp = WB.Timestamp();
+        ev.timestamp = WB.RecTimeNow();
         AddProvenance(ev);
     };
     add(0, FileARM9, WB.Rom.ARM9RomOffset, WB.Rom.ARM9RamAddress, WB.Rom.ARM9Size);
@@ -1187,7 +1200,7 @@ void Recorder::OnFrameEnd()
     TraceExec = TraceRead = TraceWrite = TraceHistory = TraceDMA = 0;
 #endif
     if (!On) return;
-    EndFrame = WB.Frame();
+    EndFrame = WB.RecFrameNow();
     for (auto& t : CpuCopy) FlushCopy(t);
 }
 
@@ -1230,12 +1243,20 @@ Workbench::Workbench() : Rec(*this), Taint(*this), Dbg(*this)
 
 Workbench::~Workbench()
 {
+    if (RecThread.joinable())
+    {
+        RecDrain();
+        RecStop = true;
+        RecWakeCond.notify_one();
+        RecThread.join();
+    }
     if (NDS) NDS->WB = nullptr;
 }
 
 void Workbench::Attach(melonDS::NDS* nds)
 {
     if (NDS == nds) return;
+    RecDrain();
     if (NDS)
     {
         NDS->WB = nullptr;
@@ -1250,6 +1271,7 @@ void Workbench::Attach(melonDS::NDS* nds)
 
 void Workbench::OnRomLoaded(const u8* rom, u32 romlen, u32 filelen)
 {
+    RecDrain();
     Rec.Reset();
     Taint.Reset();
     Rom.Load(rom, romlen, filelen);
@@ -1261,6 +1283,7 @@ void Workbench::OnRomLoaded(const u8* rom, u32 romlen, u32 filelen)
 
 void Workbench::OnReset()
 {
+    RecDrain();
     std::fill(Rec.Owner.begin(), Rec.Owner.end(), 0);
     std::fill(Rec.PageMixed.begin(), Rec.PageMixed.end(), 0);
     for (int i = 0; i < 2; i++)
@@ -1277,12 +1300,14 @@ void Workbench::OnReset()
 
 void Workbench::OnDirectBoot()
 {
+    RecDrain();
     Rec.OnBootLoad();
     if (Taint.Enabled()) Taint.SeedStaticModules();
 }
 
 void Workbench::OnStateLoaded()
 {
+    RecDrain();
     for (int i = 0; i < 2; i++)
     {
         Rec.Stack[i].clear();
@@ -1307,12 +1332,19 @@ void Workbench::UpdateHookFlags()
     bool exec = !jit && (mem || Dbg.ExecHooksNeeded());
     NDS->WBMemHooks = mem;
     NDS->WBExecHooks = exec;
+    ProdTaintOn = Taint.Enabled();
 }
 
-u32 Workbench::Frame() const { return NDS ? NDS->NumFrames : 0; }
+// the recorder thread is behind the emulator: it sees the frame and time of the event it is handling
+u32 Workbench::Frame() const
+{
+    if (tlRecThread) return RecFrame;
+    return NDS ? NDS->NumFrames : 0;
+}
 
 u64 Workbench::Timestamp() const
 {
+    if (tlRecThread) return RecTs;
     if (!NDS) return 0;
     return NDS->ARM9Timestamp >> NDS->ARM9ClockShift;
 }
@@ -1554,36 +1586,185 @@ static bool ConditionPasses(u32 cpsr, u32 cond)
     }
 }
 
+// ---------------------------------------------------------------- hooks: the emulator thread's side
+// Each hook writes one event for the recorder thread (RecDispatch below does what the hook used to do).
+// Breakpoints and watchpoints stay here: they stop the emulator at the access.
+
+Workbench::RecEvent& Workbench::RecBegin(RecMsg kind, u32 cpu)
+{
+    // the last instruction's PostExec goes first, unless this is the same CPU's next instruction
+    if (PendingPostCpu >= 0 && !(kind == RecMsg::Exec && (int)cpu == PendingPostCpu && PendingPostSeq)) RecFlushPost();
+    if (!RecThread.joinable())
+    {
+        if (!RecRing) RecRing.reset(new RecEvent[RecRingSize]);
+        RecFrame = Frame();
+        RecTs = Timestamp();
+        RecStop = false;
+        RecThread = std::thread([this]() { RecThreadMain(); });
+    }
+    u64 h = ProdHead;
+    if (h - ProdTailSeen >= RecRingSize)
+    {
+        ProdTailSeen = RecTail.load(std::memory_order_acquire);
+        if (h - ProdTailSeen >= RecRingSize)
+        {
+            // full: wait for the recorder thread to make room
+            TRACE_RECORDING("recording: ring full (emulator waits)");
+            RecPublish();
+            RecWakeCond.notify_one();
+            while (h - (ProdTailSeen = RecTail.load(std::memory_order_acquire)) >= RecRingSize) RecPause();
+        }
+    }
+    RecEvent& e = RecRing[h & (RecRingSize - 1)];
+    e.Kind = kind;
+    e.Cpu = (u8)cpu;
+    e.Flags = 0;
+    return e;
+}
+
+static void PutPost(u32* f, const PostState& p)
+{
+    f[0] = p.NPC; f[1] = p.CPSR; f[2] = p.R0; f[3] = p.R1; f[4] = p.R13; f[5] = p.R14; f[6] = p.VecBase;
+}
+
+static PostState GetPost(const u32* f)
+{
+    PostState p;
+    p.NPC = f[0]; p.CPSR = f[1]; p.R0 = f[2]; p.R1 = f[3]; p.R13 = f[4]; p.R14 = f[5]; p.VecBase = f[6];
+    return p;
+}
+
+// events carry the low 32 bits of the time; the recorder thread's last time supplies the rest
+static inline u64 TimeFromLow(u64 last, u32 lo)
+{
+    u64 t = (last & ~0xFFFFFFFFull) | lo;
+    if (t + 0x80000000ull < last) t += 0x100000000ull;
+    return t;
+}
+
+void Workbench::RecFlushPost()
+{
+    int cpu = PendingPostCpu;
+    if (cpu < 0) return;
+    PendingPostCpu = -1;
+    RecEvent& e = RecBegin(RecMsg::Post, (u32)cpu);
+    PutPost(&e.A, PendingPost);
+    RecCommit();
+}
+
+void Workbench::PostQuery(std::function<void()> job)
+{
+    if (!RecThread.joinable()) { Dbg.PostJob(std::move(job)); return; }
+    {
+        std::lock_guard<std::mutex> l(RecWakeLock);
+        RecQueries.push_back(std::move(job));
+    }
+    RecQueriesPending = true;
+    RecWakeCond.notify_one();
+}
+
+void Workbench::RecRunQueries()
+{
+    std::vector<std::function<void()>> run;
+    {
+        std::lock_guard<std::mutex> l(RecWakeLock);
+        run.swap(RecQueries);
+        RecQueriesPending = false;
+    }
+    TRACE_RECORDING("recording thread: queries");
+    for (auto& j : run) j();
+}
+
+void Workbench::RecDrain()
+{
+    // emulator thread: returns when the recorder thread has handled every event so far and is idle
+    if (tlRecThread) return;    // a query on the recorder thread: it is between events already
+    RecFlushPost();
+    RecPublish();
+    if (RecThread.joinable() && RecTail.load(std::memory_order_acquire) != ProdHead)
+    {
+        TRACE_RECORDING("recording: drain (emulator waits)");
+        RecWakeCond.notify_one();
+        while (RecTail.load(std::memory_order_acquire) != ProdHead) RecPause();
+    }
+    ProdTailSeen = ProdHead;
+    // with the ring empty both views agree (and at a break the emulator is one instruction ahead)
+    RecFrame = Frame();
+    RecTs = Timestamp();
+    RecCur[0] = Cur[0];
+    RecCur[1] = Cur[1];
+}
+
+void Workbench::RecThreadMain()
+{
+    tlRecThread = true;
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "WBRecorder");
+#endif
+    u64 t = RecTail.load(std::memory_order_relaxed);
+    for (;;)
+    {
+        if (RecQueriesPending.load(std::memory_order_relaxed)) RecRunQueries();
+        u64 h = RecHead.load(std::memory_order_acquire);
+        if (t == h)
+        {
+            if (RecStop) { if (RecQueriesPending) RecRunQueries(); return; }
+            // nothing to eat: look a few more times, then sleep until woken (frame end, drain) or 2 ms
+            for (int i = 0; i < 20000 && t == h; i++) { RecPause(); h = RecHead.load(std::memory_order_acquire); }
+            if (t == h)
+            {
+                std::unique_lock<std::mutex> lk(RecWakeLock);
+                if (RecQueries.empty()) RecWakeCond.wait_for(lk, std::chrono::milliseconds(2));
+                continue;
+            }
+        }
+        // a batch, then tell the emulator thread how far we got
+        u64 end = std::min(h, t + 512);
+        for (; t < end; t++) RecDispatch(RecRing[t & (RecRingSize - 1)]);
+        RecTail.store(t, std::memory_order_release);
+    }
+}
+
 bool Workbench::PreExec(melonDS::ARM* arm, u32 pc, u32 instr, bool thumb)
 {
     u32 cpu = arm->Num;
     if (thumb) instr &= 0xFFFF;
-
-    bool irqEntry = false;
-    if (pc != Rec.ExpectedPC[cpu] && Rec.ExpectedPC[cpu] != 0xFFFFFFFF)
-    {
-        if (Rec.Enabled()) Rec.OnDiscontinuity(cpu, arm, pc);
-        else Rec.ExpectedPC[cpu] = 0xFFFFFFFF;
-        irqEntry = pc == arm->ExceptionBase + 0x18;
-    }
-
     Cur[cpu] = pc;
     CurThumb[cpu] = thumb;
     CurInstr[cpu] = instr;
 
-    TrackMode(cpu, arm->CPSR & 0x1F, irqEntry);
-
+    // shortcut: the break comes before the recorder has seen this instruction's discontinuity (an IRQ
+    // entry's frame is on the call stack one instruction later); fine for stepping, revisit if it matters
     if (Dbg.CheckExec(cpu, pc))
         Dbg.EnterBreak(cpu, pc);
 
-    Rec.LiteralLoad[cpu] = LoadsLiteralPool(instr, thumb);
-    Rec.OnExec(cpu, pc, thumb);
-
-    if (Taint.Enabled())
+    bool cond = thumb || ConditionPasses(arm->CPSR, instr >> 28);
+    u16 ptr = 0;
+    if (ProdTaintOn)
     {
-        bool cond = thumb || ConditionPasses(arm->CPSR, instr >> 28);
-        Taint.PreExec(cpu, instr, thumb, cond, arm->R);
+        SrcSlot& sl = ProdSrc[(instr ^ (instr >> 10) ^ (instr >> 20) ^ (thumb ? 0x200 : 0)) & 1023];
+        if (!sl.Valid || sl.Instr != instr || sl.Thumb != thumb)
+        {
+            InstrOps o;
+            DecodeOps(instr, thumb, o);
+            sl.Src = (o.kind == InstrOps::Alu || o.kind == InstrOps::Branch) ? o.srcMask : 0;
+            sl.Instr = instr; sl.Thumb = thumb; sl.Valid = true;
+        }
+        if (sl.Src) ptr = Origin::PointerMask(arm->R, sl.Src);
     }
+    // an interrupt (or other jump no instruction made): the recorder needs sp and the vector base
+    bool disc = ProdExpected[cpu] != 0xFFFFFFFF && pc != ProdExpected[cpu];
+    if (disc) ProdExpected[cpu] = 0xFFFFFFFF;
+    bool seq = PendingPostCpu == (int)cpu && PendingPostSeq;
+    RecEvent& e = RecBegin(RecMsg::Exec, cpu);
+    if (seq) PendingPostCpu = -1;
+    e.Flags = (thumb ? 1 : 0) | (cond ? 2 : 0) | (seq ? 4 : 0) | (disc ? 8 : 0);
+    e.A = pc;
+    e.B = instr;
+    e.C = arm->CPSR;
+    e.D = ptr;
+    if (disc) { e.E = arm->R[13]; e.F = arm->ExceptionBase; }
+    RecCommit();
     return false;
 }
 
@@ -1600,31 +1781,34 @@ void Workbench::TrackMode(u32 cpu, u32 mode, bool irqEntry)
 
 void Workbench::PostExec(melonDS::ARM* arm)
 {
+    // kept until the next event: usually this CPU's next instruction, which carries it along
     u32 cpu = arm->Num;
-    if (Taint.Enabled()) Taint.PostExec(cpu);
-    Rec.OnPostExec(cpu, arm, Cur[cpu], CurThumb[cpu], CurInstr[cpu]);
-    if (!Rec.Enabled())
-    {
-        // still track the next PC for decompression and interrupt detection
-    }
+    if (PendingPostCpu >= 0) RecFlushPost();
+    PostState& p = PendingPost;
+    p.CPSR = arm->CPSR;
+    p.NPC = arm->R[15] - ((p.CPSR & 0x20) ? 2 : 4);
+    p.R0 = arm->R[0];
+    p.R1 = arm->R[1];
+    p.R13 = arm->R[13];
+    p.R14 = arm->R[14];
+    p.VecBase = arm->ExceptionBase;
+    PendingPostCpu = (int)cpu;
+    ProdExpected[cpu] = p.NPC;
+    // the usual case: on to the next instruction, no SWI. The recorder needs none of the state then
+    PendingPostSeq = p.NPC == Cur[cpu] + (CurThumb[cpu] ? 2 : 4) && SwiNumber(CurInstr[cpu], CurThumb[cpu]) < 0;
 }
 
 void Workbench::CpuRead(u32 cpu, u32 addr, u32 size, u32 value)
 {
     if (size == 1) value &= 0xFF;
     else if (size == 2) value &= 0xFFFF;
-    Rec.OnRead(cpu, addr, size, value);
-    if (Taint.Enabled())
-    {
-        u32 fixed = 0xFFFFFFFF;
-        if (addr == 0x04100010 && Rec.LastCard[cpu].Valid)
-        {
-            const RomFile* f = Rom.FileForOffset(Rec.LastCard[cpu].RomOffset);
-            u32 src = f ? Taint.SourceForRomFile(f->Id, Rec.LastCard[cpu].RomOffset) : 0;
-            fixed = src ? Taint.LabelForSource(src) : 0;
-        }
-        Taint.OnRead(cpu, addr, size, fixed, value);
-    }
+    u64 ts = Timestamp();
+    RecEvent& e = RecBegin(RecMsg::Read, cpu);
+    e.A = addr;
+    e.B = value;
+    e.Size = (u8)size;
+    e.E = (u32)ts;
+    RecCommit();
     if (Dbg.WatchPages && Dbg.WatchPages[addr >> PageShift])
         Dbg.CheckAccess(cpu, addr, size, value, false);
 }
@@ -1634,61 +1818,211 @@ void Workbench::CpuWrite(u32 cpu, u32 addr, u32 size, u32 value)
     if (size == 1) { value &= 0xFF; }
     else if (size == 2) { value &= 0xFFFF; addr &= ~1u; }
     else addr &= ~3u;
+    // translated here, with the mapping and memory as they are at this write
     PhysAddr pa = Translate(cpu, addr);
     u32 old = 0;
     if (u8* p = PhysPtr(pa)) memcpy(&old, p, size);
-    Rec.OnWrite(cpu, addr, size, value, old, pa);
-    if (Taint.Enabled())
-    {
-        Taint.OnWrite(cpu, addr, size);
-        Taint.TrackWriteRun(cpu, addr, size);
-    }
+    u64 ts = Timestamp();
+    RecEvent& e = RecBegin(RecMsg::Write, cpu);
+    e.A = addr;
+    e.B = value;
+    e.C = old;
+    e.D = pa.Offset;
+    e.G = pa.Region;
+    e.Size = (u8)size;
+    e.E = (u32)ts;
+    e.F = NDS ? (cpu ? NDS->ARM7.R[13] : NDS->ARM9.R[13]) : 0;
+    RecCommit();
     if (Dbg.WatchPages && Dbg.WatchPages[addr >> PageShift])
         Dbg.CheckAccess(cpu, addr, size, value, true);
 }
 
 void Workbench::DMAUnit(u32 cpu, u32 channel, u32 src, u32 dst, u32 size, u32 value)
 {
-    if (Taint.Enabled())
-    {
-        u32 fixed = 0xFFFFFFFF;
-        if (src == 0x04100010 && Rec.LastCard[cpu].Valid)
-        {
-            const RomFile* f = Rom.FileForOffset(Rec.LastCard[cpu].RomOffset);
-            u32 s = f ? Taint.SourceForRomFile(f->Id, Rec.LastCard[cpu].RomOffset) : 0;
-            fixed = s ? Taint.LabelForSource(s) : 0;
-        }
-        Taint.OnDMA(cpu, src, dst, size, fixed);
-    }
-    Rec.OnDMA(cpu, channel, src, dst, size, value);
+    u64 ts = Timestamp();
+    RecEvent& e = RecBegin(RecMsg::DMA, cpu);
+    e.A = src;
+    e.B = dst;
+    e.C = value;
+    e.D = channel;
+    e.Size = (u8)size;
+    e.E = (u32)ts;
+    RecCommit();
     if (Dbg.WatchPages && Dbg.WatchPages[dst >> PageShift])
         Dbg.CheckAccess(cpu ? 3 : 2, dst, size, value, true);
 }
 
 void Workbench::CardCommand(const u8* cmd)
 {
-    Rec.OnCardCommand(cmd);
+    RecEvent& e = RecBegin(RecMsg::CardCmd, 0);
+    memcpy(&e.A, cmd, 8);
+    RecCommit();
 }
 
 void Workbench::CardData(u32 value)
 {
-    Rec.OnCardData(value);
+    RecEvent& e = RecBegin(RecMsg::CardData, NDS ? (u32)NDS->CurCPU : 0);
+    e.A = value;
+    RecCommit();
 }
 
 void Workbench::TcmChanged()
 {
-    MapGen++;
     if (!NDS) return;
     u32 dtcmsize = NDS->ARM9.DTCMMask ? (~NDS->ARM9.DTCMMask + 1) : 0;
-    Rec.OnTcmChange(NDS->ARM9.ITCMSize, NDS->ARM9.DTCMBase, dtcmsize);
+    RecEvent& e = RecBegin(RecMsg::Tcm, 0);
+    e.A = NDS->ARM9.ITCMSize;
+    e.B = NDS->ARM9.DTCMBase;
+    e.C = dtcmsize;
+    RecCommit();
+}
+
+void Workbench::MappingChanged()
+{
+    RecBegin(RecMsg::Mapping, 0);
+    RecCommit();
 }
 
 void Workbench::FrameEnd()
 {
-    Rec.OnFrameEnd();
-    if (Taint.Enabled()) Taint.FrameEndSeeds();
+    u64 ts = Timestamp();
+    RecEvent& e = RecBegin(RecMsg::FrameEnd, 0);
+    e.A = Frame();
+    e.E = (u32)ts;
+    e.F = (u32)(ts >> 32);
+    RecCommit();
+    RecPublish();
+    RecWakeCond.notify_one();
+    TRACE_RECORDING_PLOT("recording: ring events waiting at frame end", ProdHead - RecTail.load(std::memory_order_relaxed));
     Dbg.FrameEnd();
     Dbg.ServiceJobs();
 }
 
+// ---------------------------------------------------------------- hooks: the recorder thread's side
+
+void Workbench::RecDispatch(const RecEvent& e)
+{
+    u32 cpu = e.Cpu;
+    switch (e.Kind)
+    {
+    case RecMsg::Exec:
+        {
+            if (e.Flags & 4)
+            {
+                // the last instruction went on to this one: only the next address matters
+                PostState post;
+                post.NPC = RecCur[cpu] + (RecThumb[cpu] ? 2 : 4);
+                post.CPSR = RecThumb[cpu] ? 0x20 : 0;
+                if (Taint.Enabled()) Taint.PostExec(cpu);
+                Rec.OnPostExec(cpu, post, RecCur[cpu], RecThumb[cpu], RecInstr[cpu]);
+            }
+            u32 pc = e.A, instr = e.B;
+            bool thumb = e.Flags & 1;
+            bool irqEntry = false;
+            if (pc != Rec.ExpectedPC[cpu] && Rec.ExpectedPC[cpu] != 0xFFFFFFFF)
+            {
+                u32 sp = (e.Flags & 8) ? e.E : 0, vec = (e.Flags & 8) ? e.F : 0xFFFFFFFF;
+                if (Rec.Enabled()) Rec.OnDiscontinuity(cpu, pc, sp, vec);
+                else Rec.ExpectedPC[cpu] = 0xFFFFFFFF;
+                irqEntry = (e.Flags & 8) && pc == vec + 0x18;
+            }
+            RecCur[cpu] = pc;
+            RecThumb[cpu] = thumb;
+            RecInstr[cpu] = instr;
+            TrackMode(cpu, e.C & 0x1F, irqEntry);
+            Rec.LiteralLoad[cpu] = LoadsLiteralPool(instr, thumb);
+            Rec.OnExec(cpu, pc, thumb);
+            if (Taint.Enabled()) Taint.PreExec(cpu, instr, thumb, e.Flags & 2, (u16)e.D);
+        }
+        break;
+    case RecMsg::Post:
+        {
+            PostState post = GetPost(&e.A);
+            if (Taint.Enabled()) Taint.PostExec(cpu);
+            Rec.OnPostExec(cpu, post, RecCur[cpu], RecThumb[cpu], RecInstr[cpu]);
+        }
+        break;
+    case RecMsg::Read:
+        {
+            RecTs = TimeFromLow(RecTs, e.E);
+            u32 addr = e.A, size = e.Size, value = e.B;
+            Rec.OnRead(cpu, addr, size, value);
+            if (Taint.Enabled())
+            {
+                u32 fixed = 0xFFFFFFFF;
+                if (addr == 0x04100010 && Rec.LastCard[cpu].Valid)
+                {
+                    const RomFile* f = Rom.FileForOffset(Rec.LastCard[cpu].RomOffset);
+                    u32 src = f ? Taint.SourceForRomFile(f->Id, Rec.LastCard[cpu].RomOffset) : 0;
+                    fixed = src ? Taint.LabelForSource(src) : 0;
+                }
+                Taint.OnRead(cpu, addr, size, fixed, value);
+            }
+        }
+        break;
+    case RecMsg::Write:
+        {
+            RecTs = TimeFromLow(RecTs, e.E);
+            PhysAddr pa;
+            pa.Region = (u16)e.G;
+            pa.Offset = e.D;
+            // main RAM's overlay owner is the recorder thread's (the emulator thread's look is behind it)
+            if (pa.Region == (u16)Region::MainRAM || IsOverlayRegion(pa.Region))
+            {
+                u16 o = Rec.Owner[(pa.Offset & 0xFFFFFF) >> 2];
+                u32 code = o ? o - 1u : 0;
+                u32 id = code & 0x7FFF;
+                pa.Region = (o && id < 256) ? (u16)(((code >> 15) ? (u16)Region::OverlayARM7Base : (u16)Region::OverlayARM9Base) + id)
+                                            : (u16)Region::MainRAM;
+            }
+            Rec.OnWrite(cpu, e.A, e.Size, e.B, e.C, pa, e.F);
+            if (Taint.Enabled())
+            {
+                Taint.OnWrite(cpu, e.A, e.Size);
+                Taint.TrackWriteRun(cpu, e.A, e.Size);
+            }
+        }
+        break;
+    case RecMsg::DMA:
+        {
+            RecTs = TimeFromLow(RecTs, e.E);
+            u32 src = e.A, dst = e.B, size = e.Size;
+            if (Taint.Enabled())
+            {
+                u32 fixed = 0xFFFFFFFF;
+                if (src == 0x04100010 && Rec.LastCard[cpu].Valid)
+                {
+                    const RomFile* f = Rom.FileForOffset(Rec.LastCard[cpu].RomOffset);
+                    u32 s2 = f ? Taint.SourceForRomFile(f->Id, Rec.LastCard[cpu].RomOffset) : 0;
+                    fixed = s2 ? Taint.LabelForSource(s2) : 0;
+                }
+                Taint.OnDMA(cpu, src, dst, size, fixed);
+            }
+            Rec.OnDMA(cpu, e.D, src, dst, size, e.C);
+        }
+        break;
+    case RecMsg::CardCmd:
+        Rec.OnCardCommand((const u8*)&e.A);
+        break;
+    case RecMsg::CardData:
+        Rec.OnCardData(cpu, e.A);
+        break;
+    case RecMsg::Tcm:
+        MapGen++;
+        Rec.OnTcmChange(e.A, e.B, e.C);
+        break;
+    case RecMsg::Mapping:
+        MapGen++;
+        break;
+    case RecMsg::FrameEnd:
+        RecFrame = e.A;
+        RecTs = e.E | ((u64)e.F << 32);
+        Rec.OnFrameEnd();
+        if (Taint.Enabled()) Taint.FrameEndSeeds();
+        break;
+    }
 }
+
+}
+
+

@@ -390,7 +390,7 @@ static void TestOriginBankedPointers()
     u32 label = wb.Taint.LabelForSource(wb.Taint.AddSource(src));
     u32 regs[16] = {};
     regs[14] = 0x1234;                                  // data, not an address
-    auto exec = [&](u32 instr) { wb.Taint.PreExec(0, instr, false, true, regs); wb.Taint.PostExec(0); };
+    auto exec = [&](u32 instr) { wb.Taint.PreExec(0, instr, false, true, melonDS::WB::Origin::PointerMask(regs)); wb.Taint.PostExec(0); };
     wb.TrackMode(0, 0x1F, false);                       // system mode
     wb.Taint.SetRegLabel(0, 14, label);                 // lr holds keypad data
     wb.TrackMode(0, 0x12, true);                        // IRQ entry

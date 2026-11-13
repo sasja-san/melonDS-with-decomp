@@ -154,11 +154,11 @@ u32 Origin::SourceForRomFile(u32 fileid, u32 romoff)
         // its unpacked copy will be labelled once it appears (CheckSeeds)
         bool known = false;
         for (PendingFile& p : Pending)
-            if (p.FileId == fileid && p.Member == member) { p.Frame = WB.Frame(); p.Source = src; p.Members = members; known = true; break; }
+            if (p.FileId == fileid && p.Member == member) { p.Frame = WB.RecFrameNow(); p.Source = src; p.Members = members; known = true; break; }
         if (!known)
         {
             if (Pending.size() >= 64) Pending.erase(Pending.begin());
-            Pending.push_back({fileid, member, src, WB.Frame(), members});
+            Pending.push_back({fileid, member, src, WB.RecFrameNow(), members});
         }
     }
     return src;
@@ -210,7 +210,7 @@ void Origin::CheckSeeds(u32 cpu, bool all)
         CheckRun(cpu, r, which);
     }
     // files read but never unpacked where we could see them are dropped after a while
-    u32 now = WB.Frame();
+    u32 now = WB.RecFrameNow();
     Pending.erase(std::remove_if(Pending.begin(), Pending.end(), [now](const PendingFile& p) { return now - p.Frame > 600; }), Pending.end());
 }
 
@@ -308,7 +308,7 @@ u32 Origin::Union(u32 a, u32 b)
     if (a == ConstLabel) return b;
     if (b == ConstLabel) return a;
     if (a > b) std::swap(a, b);
-    u32 pc = WB.Cur[OpCpu & 1];
+    u32 pc = WB.RecPC(OpCpu & 1);
     u64 site = MergeSite(OpCpu, Op, pc);
     UnionKey key {a, b, site};
     auto it = UnionCache.find(key);
@@ -334,7 +334,7 @@ u32 Origin::Union(u32 a, u32 b)
         m.A = a;
         m.B = b;
         m.PC = pc;
-        m.Frame = WB.Frame();
+        m.Frame = WB.RecFrameNow();
         m.Cpu = OpCpu;
         m.Op = Op;
         Made.push_back(m);
@@ -444,7 +444,15 @@ static bool PointerLike(u32 v)
     return hi == 0x02 || hi == 0x03 || hi == 0x04 || hi == 0x06 || (v >= 0x01FF8000 && v < 0x02000000);
 }
 
-void Origin::PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, const u32* regs)
+u16 Origin::PointerMask(const u32* regs, u16 which)
+{
+    u16 m = 0;
+    for (int r = 0; which && r < 15; r++, which >>= 1)
+        if ((which & 1) && PointerLike(regs[r])) m |= (u16)(1 << r);
+    return m;
+}
+
+void Origin::PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, u16 ptrMask)
 {
     OpsActive[cpu] = false;
     if (!condpass) return;
@@ -468,7 +476,7 @@ void Origin::PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, const u32* r
         {
             u16 m = o.srcMask & NonZero[cpu];
             u16 lm = m, am = m, isPtr = 0;
-            if (FollowAddr && regs)
+            if (FollowAddr)
             {
                 // pointer arithmetic (base + index, pointer += length) carries only the data operand's
                 // label, even an unlabelled one: as an address for any address-like operand, and in the
@@ -477,7 +485,7 @@ void Origin::PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, const u32* r
                 for (int r = 0; r < 15; r++)
                     if (o.srcMask & (1 << r))
                     {
-                        if (PointerLike(regs[r]))
+                        if (ptrMask & (1 << r))
                         {
                             ptrs |= (u16)(1 << r);
                             if (Pointer[cpu] & (1 << r)) known |= (u16)(1 << r);
@@ -768,7 +776,7 @@ void Origin::SeedStaticModules(bool byContent)
 
 u64 Origin::RebuildAfterStateLoad()
 {
-    LoadedFrame = WB.Frame();
+    LoadedFrame = WB.RecFrameNow();
     // what was labelled described memory the load replaced
     Mem.Clear();
     memset(Reg, 0, sizeof(Reg));

@@ -181,11 +181,13 @@ void WBHost::SaveSettings()
 
 void WBHost::AttachNDS(NDS* nds)
 {
+    WB.RecDrain();      // the recorder thread must be idle before Rec/Taint are touched here
     WB.Attach(nds);
 }
 
 void WBHost::OnRomLoaded(const QString& path, u32 filelen)
 {
+    WB.RecDrain();      // the recorder thread must be idle before Rec/Taint are touched here
     NDS* nds = WB.GetNDS();
     if (!nds || !nds->GetNDSCart()) return;
     // a new game closes the running session
@@ -1383,6 +1385,7 @@ void WBHost::OnCoreEvent(const WBEvent& ev)
 
 void WBHost::StartRecordingNow()
 {
+    WB.RecDrain();      // the recorder thread must be idle before Rec/Taint are touched here
     TRACE_RECORDING("recording: start (GUI side)");
     // emulation thread
     if (WB.Rec.Enabled() || WB.JITActive() || !WB.GetNDS()) return;
@@ -1599,6 +1602,7 @@ void WBHost::RefreshFuncSnapshot()
 
 bool WBHost::CollectSession(bool keepRecording, CollectedSession& out)
 {
+    WB.RecDrain();      // the recorder thread must be idle before Rec/Taint are touched here
     // emulation thread
     if (!WB.Rec.Enabled()) return false;
     std::vector<FuncSnap> funcs;
@@ -2154,6 +2158,7 @@ void WBHost::FinishSession(bool keepRecording)
 
 void WBHost::OnGameClosing()
 {
+    WB.RecDrain();      // the recorder thread must be idle before Rec/Taint are touched here
     // emulation thread: the game stops, another one boots, or melonDS quits
     if (!WB.Rec.Enabled()) return;
     auto cs = std::make_shared<CollectedSession>();

@@ -296,6 +296,7 @@ void Debugger::Continue()
 
 void Debugger::EnterBreak(u32 cpu, u32 pc)
 {
+    WB.RecDrain();      // what the panels show at the break is complete
     {
         std::lock_guard<std::mutex> l(StateLock);
         Break = NextBreak;
@@ -366,6 +367,7 @@ bool Debugger::ServiceJobs()
         if (Jobs.empty()) return false;
         run.swap(Jobs);
     }
+    WB.RecDrain();      // jobs read and change Rec/Taint: the recorder thread must be idle
     for (auto& j : run) j();
     return true;
 }

@@ -149,7 +149,8 @@ RegistersPanel::RegistersPanel(WorkbenchWindow* w) : WBPanel(w)
 
 void RegistersPanel::Refresh()
 {
-    if (Busy) return;
+    // registers are only worth reading while the game stands still (paused, at a break)
+    if (Busy || H->Status().EmuState == WBStatus::Running) return;
     Busy = true;
     H->Query<std::pair<WBApi::RegisterSet, WBApi::RegisterSet>>([this]()
     {

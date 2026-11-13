@@ -169,7 +169,8 @@ public:
     void Query(std::function<R()> fn, QObject* ctx, std::function<void(R)> cb)
     {
         QPointer<QObject> guard(ctx);
-        WB.Dbg.PostJob([fn = std::move(fn), cb = std::move(cb), guard]() mutable
+        // queries only read: the recorder thread runs them between two events (Workbench::PostQuery)
+        WB.PostQuery([fn = std::move(fn), cb = std::move(cb), guard]() mutable
         {
             R r = fn();
             if (!guard) return;
