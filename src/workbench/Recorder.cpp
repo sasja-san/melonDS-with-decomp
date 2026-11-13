@@ -1739,12 +1739,13 @@ void Workbench::RecThreadMain()
         if (t == h)
         {
             if (RecStop) { if (RecQueriesPending) RecRunQueries(); return; }
-            // nothing to eat: look a few more times, then sleep until woken (frame end, drain) or 2 ms
-            for (int i = 0; i < 20000 && t == h; i++) { RecPause(); h = RecHead.load(std::memory_order_acquire); }
+            // nothing to eat: look a few more times, then sleep until woken (frame end, drain, full ring,
+            // query) or 20 ms. A long spin here costs a third of a core while the game is idle
+            for (int i = 0; i < 200 && t == h; i++) { RecPause(); h = RecHead.load(std::memory_order_acquire); }
             if (t == h)
             {
                 std::unique_lock<std::mutex> lk(RecWakeLock);
-                if (RecQueries.empty()) RecWakeCond.wait_for(lk, std::chrono::milliseconds(2));
+                if (RecQueries.empty()) RecWakeCond.wait_for(lk, std::chrono::milliseconds(20));
                 continue;
             }
         }
