@@ -35,6 +35,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <bitset>
 #include <vector>
 
 #include "types.h"
@@ -334,6 +335,9 @@ private:
 
     // per-instruction state
     InstrOps Ops[2];
+    // DecodeOps depends only on the instruction word and Thumb, and the same code runs over and over
+    struct DecodeSlot { u32 Instr = 0; bool Thumb = false, Valid = false; InstrOps Ops; };
+    DecodeSlot DecodeCache[4096];
     bool OpsActive[2] {};
     u32 PendingLabel[2] {};
     u32 LoadIdx[2] {}, StoreIdx[2] {};
@@ -620,7 +624,11 @@ public:
     bool TakeEntries(std::vector<ObservedEntry>& out);
 
     // function entries the knowledge store knows, so branches into functions never seen called still count as tail calls
-    void SetKnownFunctions(u32 cpu, const std::vector<u32>& entries) { KbEntries[cpu & 1] = std::unordered_set<u32>(entries.begin(), entries.end()); }
+    void SetKnownFunctions(u32 cpu, const std::vector<u32>& entries)
+    {
+        KbEntries[cpu & 1] = std::unordered_set<u32>(entries.begin(), entries.end());
+        for (u32 e : entries) EntryHint[cpu & 1][(e >> 1) & 0xFFFF] = true;
+    }
     void FlushTransfers();
 
     // session serialization (pages, edges, events ...)
@@ -681,6 +689,9 @@ private:
     void NoteEntry(u32 cpu, u32 addr, bool thumb);
     void ScanExecutedPrologues();
     std::unordered_set<u32> KbEntries[2];       // function entries from the knowledge store (SetKnownFunctions)
+    // a bit per hash of every address in KnownEntries/KbEntries: a clear bit skips the set lookups on the
+    // instruction path. Never cleared: a stale bit only costs the lookup
+    std::bitset<0x10000> EntryHint[2];
     HistoryFilter HFilter;
     u64 Skipped = 0;
     struct BulkRun { u32 End = 0, Len = 0; };

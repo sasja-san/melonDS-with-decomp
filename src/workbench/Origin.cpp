@@ -450,7 +450,13 @@ void Origin::PreExec(u32 cpu, u32 instr, bool thumb, bool condpass, const u32* r
     if (!condpass) return;
 
     InstrOps& o = Ops[cpu];
-    DecodeOps(instr, thumb, o);
+    DecodeSlot& slot = DecodeCache[(instr ^ (instr >> 12) ^ (instr >> 20) ^ (thumb ? 0x800 : 0)) & 4095];
+    if (!slot.Valid || slot.Instr != instr || slot.Thumb != thumb)
+    {
+        DecodeOps(instr, thumb, slot.Ops);
+        slot.Instr = instr; slot.Thumb = thumb; slot.Valid = true;
+    }
+    o = slot.Ops;
     LoadIdx[cpu] = StoreIdx[cpu] = 0;
 
     switch (o.kind)

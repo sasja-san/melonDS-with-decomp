@@ -564,6 +564,7 @@ void Recorder::AddEdge(u32 cpu, u32 callsite, u32 callee, u32 callerfunc, CallKi
     if (kind == CallKind::Call || kind == CallKind::TailCall)
     {
         KnownEntries[cpu & 1].insert(callee);
+        EntryHint[cpu & 1][(callee >> 1) & 0xFFFF] = true;
         NoteEntry(cpu, callee & ~1u, thumb || (callee & 1));
     }
     CallEdgeKey k {callsite, callee};
@@ -700,7 +701,7 @@ void Recorder::OnPostExec(u32 cpu, ARM* arm, u32 pc, bool thumb, u32 instr)
     // knowledge store
     bool b = thumb ? ((instr & 0xF800) == 0xE000 || ((instr & 0xF000) == 0xD000 && ((instr >> 8) & 0xF) < 0xE))
                    : ((instr & 0x0F000000) == 0x0A000000 && (instr >> 28) != 0xF);
-    if (b && !st.empty() && (st.back().callee & ~1u) != npc && (KnownEntries[cpu].count(npc) || KbEntries[cpu].count(npc)))
+    if (b && !st.empty() && (st.back().callee & ~1u) != npc && EntryHint[cpu][(npc >> 1) & 0xFFFF] && (KnownEntries[cpu].count(npc) || KbEntries[cpu].count(npc)))
     {
         ShadowFrame& f = st.back();
         u32 callerfunc = f.callee;
