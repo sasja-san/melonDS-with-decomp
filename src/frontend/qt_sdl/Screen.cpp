@@ -864,14 +864,13 @@ void ScreenPanelNative::paintEvent(QPaintEvent* event)
             painter.setTransform(screenTrans[i]);
             painter.drawImage(screenrc, useSoft ? filtered[screenKind[i]] : screen[screenKind[i]]);
         }
-#ifdef MELONDS_TRACE_QT
         if (hasBuffers && mainWindow->isVisible() && !shownTraced)
         {
             shownTraced = true;
             if (mainWindow->isEmbedded()) TRACE_QT_MESSAGE("first frame shown (workbench game screen)");
             else TRACE_QT_MESSAGE("first frame shown (main window)");
+            QTimer::singleShot(0, qApp, []() { applyDesktopLook(); });     // the full look, once the game shows
         }
-#endif
     }
 
     osdUpdate();
@@ -1323,15 +1322,15 @@ void ScreenPanelGL::drawScreen()
     }
 
     glContext->SwapBuffers();
-#ifdef MELONDS_TRACE_QT
-    // landmarks: the first frame on a window that is on screen (the hidden main window of -wo doesn't count)
+    // the first frame on a window that is on screen (the hidden main window of -wo doesn't count): a
+    // landmark in traces, and the time to put on the desktop's full look (applyDesktopLook)
     if (emuThread->emuIsActive() && mainWindow->isVisible() && !shownTraced)
     {
         shownTraced = true;
         if (mainWindow->isEmbedded()) TRACE_QT_MESSAGE("first frame shown (workbench game screen)");
         else TRACE_QT_MESSAGE("first frame shown (main window)");
+        QTimer::singleShot(0, qApp, []() { applyDesktopLook(); });
     }
-#endif
 }
 
 qreal ScreenPanelGL::devicePixelRatioFromScreen() const

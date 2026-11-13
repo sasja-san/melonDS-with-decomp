@@ -58,6 +58,9 @@ extern QString emuDirectory;
 extern QElapsedTimer sysTimer;
 
 bool createEmuInstance();
+// the desktop's full look (KDE: Breeze, its color scheme, font and icons) when startup used Qt's quick
+// generic theme; called once the first game frame is on screen, and by a timer when no game shows
+void applyDesktopLook();
 void deleteEmuInstance(int id);
 void deleteAllEmuInstances(int first = 0);
 int numEmuInstances();

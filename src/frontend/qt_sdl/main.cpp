@@ -26,6 +26,11 @@
 #include <string>
 
 #include <QApplication>
+#include <QDir>
+#include <QIcon>
+#include <QTimer>
+#include <QStyleFactory>
+#include <QSettings>
 #include <QStyle>
 #include <QMessageBox>
 #include <QMenuBar>
@@ -185,6 +190,66 @@ void broadcastInstanceCommand(int cmd, QVariant& param, int sourceinst)
 }
 
 
+// On KDE, the platform theme plugin costs ~100 ms of QApplication's start (it loads a pile of KDE
+// libraries). So melonDS starts on Qt's generic theme, which shows the game sooner, and puts KDE's look
+// on afterwards: the Breeze style, and Breeze Dark's palette, font and icons as KDE's plugin gives them
+// (read off a Qt app under KDE Plasma 6 with Breeze Dark; hard-coded). The first frames have Qt's plain
+// light look until then.
+// shortcut: Breeze Dark only, hard-coded; read the desktop's color scheme if another one is ever wanted
+static bool lateDesktopLook = false;
+
+// Breeze Dark's colors, right after QApplication is made: no white surfaces from the first paint on
+static void applyDarkPalette()
+{
+    TRACE_QT("applyDarkPalette");
+    // active, inactive and disabled color of each role
+    static const struct { QPalette::ColorRole Role; QRgb Color[3]; } breezeDark[] = {
+        {QPalette::WindowText, {0xfcfcfc, 0xfcfcfc, 0x686a6c}},
+        {QPalette::Button, {0x292c30, 0x292c30, 0x272a2e}},
+        {QPalette::Light, {0x393e43, 0x393e43, 0x383d42}},
+        {QPalette::Midlight, {0x2e3337, 0x2e3337, 0x2d3136}},
+        {QPalette::Dark, {0x131516, 0x131516, 0x121415}},
+        {QPalette::Mid, {0x1c1f21, 0x1c1f21, 0x1b1d20}},
+        {QPalette::Text, {0xfcfcfc, 0xfcfcfc, 0x606263}},
+        {QPalette::BrightText, {0xffffff, 0xffffff, 0xffffff}},
+        {QPalette::ButtonText, {0xfcfcfc, 0xfcfcfc, 0x6d6f72}},
+        {QPalette::Base, {0x141618, 0x141618, 0x131517}},
+        {QPalette::Window, {0x202326, 0x202326, 0x1f2124}},
+        {QPalette::Shadow, {0x0e0f10, 0x0e0f10, 0x0d0e0f}},
+        {QPalette::Highlight, {0x3daee9, 0x1b4155, 0x1f2124}},
+        {QPalette::HighlightedText, {0xfcfcfc, 0xfcfcfc, 0x686a6c}},
+        {QPalette::Link, {0x1d99f3, 0x1d99f3, 0x164160}},
+        {QPalette::LinkVisited, {0x9b59b6, 0x9b59b6, 0x402b4c}},
+        {QPalette::AlternateBase, {0x1d1f22, 0x1d1f22, 0x1c1e20}},
+        {QPalette::ToolTipBase, {0x292c30, 0x292c30, 0x292c30}},
+        {QPalette::ToolTipText, {0xfcfcfc, 0xfcfcfc, 0xfcfcfc}},
+        {QPalette::PlaceholderText, {0xa1a9b1, 0xa1a9b1, 0x42464a}},
+        {QPalette::Accent, {0x3daee9, 0x1b4155, 0x1f2124}},
+    };
+    QPalette pal;
+    for (const auto& c : breezeDark)
+    {
+        pal.setColor(QPalette::Active, c.Role, QColor(c.Color[0]));
+        pal.setColor(QPalette::Inactive, c.Role, QColor(c.Color[1]));
+        pal.setColor(QPalette::Disabled, c.Role, QColor(c.Color[2]));
+    }
+    QApplication::setPalette(pal);
+}
+
+void applyDesktopLook()
+{
+    if (!lateDesktopLook) return;
+    lateDesktopLook = false;
+    TRACE_QT("applyDesktopLook");
+    // the Breeze style restyles every widget: ~300 ms with the window frozen
+    if (Config::GetGlobalTable().GetQString("UITheme").isEmpty() && QStyleFactory::keys().contains("Breeze", Qt::CaseInsensitive))
+        QApplication::setStyle("Breeze");
+    QFont font;
+    font.fromString("Noto Sans,10,-1,0,400,0,0,0,0,0,0,0,0,0,0,1");
+    QApplication::setFont(font);
+    QIcon::setThemeName("breeze-dark");
+}
+
 void pathInit(const QString& appdirpath)
 {
     // First, check for the portable directory next to the executable.
@@ -337,6 +402,12 @@ int main(int argc, char** argv)
     // positions are ignored. Default to X11 (XWayland) unless the user chose.
     if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "xcb");
+    // KDE: the quick generic theme to start, the desktop's look after the first frame (applyDesktopLook)
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORMTHEME") && qgetenv("XDG_CURRENT_DESKTOP").contains("KDE"))
+    {
+        qputenv("QT_QPA_PLATFORMTHEME", "generic");
+        lateDesktopLook = true;
+    }
 #endif
 
 #if defined(_WIN32)
@@ -390,6 +461,7 @@ int main(int argc, char** argv)
     QSocketNotifier* quitOnSignal = signalPipe[0] >= 0 ? new QSocketNotifier(signalPipe[0], QSocketNotifier::Read, &melon) : nullptr;
     if (quitOnSignal) QObject::connect(quitOnSignal, &QSocketNotifier::activated, &melon, []() { qApp->quit(); });
 #endif
+    if (lateDesktopLook) applyDarkPalette();
     TRACE_QT_STEP("startup: paths and arguments");
 #ifndef __linux__
     pathInit(QCoreApplication::applicationDirPath());
@@ -529,6 +601,8 @@ int main(int argc, char** argv)
     }
 
     TRACE_QT_STEP_END();
+    // no game on screen (no ROM, or it fails to boot): the desktop's look anyway
+    QTimer::singleShot(2000, qApp, []() { applyDesktopLook(); });
     TRACE_QT_MESSAGE("event loop starts");
     int ret = melon.exec();
     TRACE_QT_STEP("shutdown");
