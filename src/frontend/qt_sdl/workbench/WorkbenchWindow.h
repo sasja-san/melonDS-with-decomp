@@ -282,6 +282,7 @@ private:
     QWidget* GameHost = nullptr;
     QWidget* GamePlaceholder = nullptr;
     MainWindow* GameWin = nullptr;
+    ads::CDockWidget* StandIn = nullptr;    // fills the window beside the game until the layout is built
     QHash<QString, QAction*> Actions;
     bool HasMenuTarget = false;
     CmdTarget MenuTarget;

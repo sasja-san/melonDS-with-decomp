@@ -387,9 +387,17 @@ void WorkbenchWindow::FinishLayout()
         ActEmbed->setChecked(true);
         ActHideMain->setChecked(only || cfg.GetBool("Workbench.HideMainWindow"));
         // the game goes on screen first, the rest of the layout (~350 ms) after it. With the default
-        // layout skipped no panel is placed yet: the game panel gets the whole window until then
+        // layout skipped no panel is placed yet: the game panel goes to the left edge, where layouts
+        // keep it, beside an empty stand-in for the rest until the layout is built
         if (DefaultCached)
-            if (ads::CDockWidget* g = DockMgr->findDockWidget("dock_game")) DockMgr->addDockWidget(ads::CenterDockWidgetArea, g);
+            if (ads::CDockWidget* g = DockMgr->findDockWidget("dock_game"))
+            {
+                StandIn = new ads::CDockWidget(DockMgr, "Loading");
+                StandIn->setObjectName("dock_standin");
+                StandIn->setWidget(new QWidget());
+                DockMgr->addDockWidget(ads::CenterDockWidgetArea, StandIn);
+                DockMgr->addDockWidget(ads::LeftDockWidgetArea, g);
+            }
         // not before the emulator has run a few frames: the game window's OpenGL context is made on the
         // emulation thread, which sets up its own at startup
         auto* wait = new QTimer(this);
@@ -416,6 +424,8 @@ void WorkbenchWindow::StartLayout()
     LayoutStarted = true;
     // the current workspace's layout; one that can't be restored falls back to the workspace's default
     RestoreCurrentWorkspace();
+    // the restore left the stand-in unplaced (it isn't in the layout)
+    if (StandIn) { DockMgr->removeDockWidget(StandIn); StandIn->deleteLater(); StandIn = nullptr; }
     // the saved layout may have the game panel closed
     if (GameWin) if (ads::CDockWidget* g = DockMgr->findDockWidget("dock_game")) g->toggleView(true);
     RebuildWorkspaceMenu();
@@ -1319,6 +1329,15 @@ void WorkbenchWindow::SetEmbeddedScreen(bool on)
         GameHost->layout()->addWidget(GameWin);
         GamePlaceholder->hide();
         GameWin->show();
+        // before the layout is built: the game column as wide as the game is when it fills the height
+        // (two 256x192 screens over each other, 8 px apart), not its smallest size
+        if (StandIn)
+            if (QSplitter* root = DockMgr->findChild<QSplitter*>(QString(), Qt::FindDirectChildrenOnly))
+                if (root->count() == 2)
+                {
+                    int w = root->height() * 256 / (384 + 8) + 8;
+                    root->setSizes({w, std::max(1, root->width() - w)});
+                }
         connect(GameWin, &QObject::destroyed, this, [this]()
         {
             // closed by melonDS itself (its instance shutting down)
